@@ -425,6 +425,8 @@ test-results/
 # Mac bundle stuff
 *.dmg
 *.app
+!src/MidiRouter.App/
+!src/MidiRouter.App/**
 
 # content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
 # General

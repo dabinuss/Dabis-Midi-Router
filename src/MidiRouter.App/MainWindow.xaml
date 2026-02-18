@@ -1,0 +1,54 @@
+<Window x:Class="MidiRouter.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:views="clr-namespace:MidiRouter.UI.Views;assembly=MidiRouter.UI"
+        mc:Ignorable="d"
+        Title="Dabis Midi Router"
+        Height="700"
+        Width="1100"
+        MinHeight="550"
+        MinWidth="900">
+    <DockPanel>
+        <Border DockPanel.Dock="Top" Background="#121C2A" Padding="16,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel>
+                    <TextBlock Text="Dabis Midi Router"
+                               FontSize="22"
+                               FontWeight="Bold"
+                               Foreground="White" />
+                    <TextBlock Text="{Binding StatusText}"
+                               Foreground="#CCFFFFFF" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Neu laden"
+                            Command="{Binding ReloadConfigCommand}"
+                            Padding="12,6"
+                            Margin="0,0,8,0" />
+                    <Button Content="Speichern"
+                            Command="{Binding SaveConfigCommand}"
+                            Padding="12,6" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <TabControl Margin="12">
+            <TabItem Header="Routing">
+                <views:RoutingView DataContext="{Binding Routing}" />
+            </TabItem>
+            <TabItem Header="Monitor">
+                <views:MonitorView DataContext="{Binding Monitor}" />
+            </TabItem>
+            <TabItem Header="Settings">
+                <views:SettingsView DataContext="{Binding Settings}" />
+            </TabItem>
+        </TabControl>
+    </DockPanel>
+</Window>

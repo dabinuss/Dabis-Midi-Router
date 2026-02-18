@@ -1,40 +1,29 @@
-# MidiRouter
+# Dabis Midi Router
 
-WPF app skeleton for a Windows MIDI Services based router/monitor.
+WPF-Anwendung auf .NET 8 fuer MIDI-Routing und Monitoring unter Windows (Windows MIDI Services).
 
-## Stack
+## Projektstruktur
+
+```text
+.
+|-- MidiRouter.sln
+|-- src/
+|   |-- MidiRouter.App/
+|   |-- MidiRouter.Core/
+|   `-- MidiRouter.UI/
+`-- tests/
+    `-- MidiRouter.Core.Tests/
+```
+
+## Tech-Stack
 
 - .NET 8
 - WPF
-- MVVM Toolkit (`CommunityToolkit.Mvvm`)
+- CommunityToolkit.Mvvm
 - Serilog
 - Hardcodet.NotifyIcon.Wpf
 
-## Repository layout
-
-```text
-MidiRouter/
-├── MidiRouter.sln
-├── src/
-│   ├── MidiRouter.App/
-│   ├── MidiRouter.Core/
-│   └── MidiRouter.UI/
-└── tests/
-    └── MidiRouter.Core.Tests/
-```
-
-## Current state
-
-This repo contains a runnable phase-1 foundation:
-
-- DI bootstrapped WPF host startup
-- JSON config store under `%AppData%/MidiRouter/config.json`
-- Route matrix model + filtering primitives
-- Endpoint catalog abstraction with in-memory sample endpoints
-- Basic Routing / Monitor / Settings views and viewmodels
-- Unit tests for route filtering and config persistence
-
-## Build and test
+## Build und Test
 
 ```powershell
 dotnet restore .\MidiRouter.sln
@@ -42,11 +31,12 @@ dotnet build .\MidiRouter.sln
 dotnet test .\MidiRouter.sln
 ```
 
-## WMS SDK note
+## Konfiguration
 
-The package `Microsoft.Windows.Devices.Midi2` was not available from the default NuGet feed during setup.
-The project therefore includes abstractions/placeholders for endpoint/session wiring. Add the official WMS SDK package/feed once available in your environment.
+Die App speichert ihre Konfiguration standardmaessig unter:
 
-## Source concept
+`%AppData%/DabisMidiRouter/config.json`
 
-`koncept.md` in this repository mirrors your project plan.
+## Projektkonzept
+
+Die Planungsdatei liegt unter `concept.md`.

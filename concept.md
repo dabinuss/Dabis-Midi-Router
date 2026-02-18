@@ -1,4 +1,4 @@
-# MidiRouter – Projektplan
+# Dabis Midi Router – Projektplan
 
 > WPF-App als Ersatz für loopMIDI + MIDI-OX, basierend auf **Windows MIDI Services**.
 
@@ -13,7 +13,7 @@
 | Virtuelle Ports | WMS Loopback Endpoints (kein Drittanbieter-Treiber nötig) |
 | MVVM | CommunityToolkit.Mvvm |
 | Tray Icon | Hardcodet.NotifyIcon.Wpf |
-| Config | System.Text.Json → `%AppData%/MidiRouter/config.json` |
+| Config | System.Text.Json → `%AppData%/DabisMidiRouter/config.json` |
 | Logging | Serilog |
 
 ---
