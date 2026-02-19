@@ -21,7 +21,18 @@ public static class CoreServiceCollectionExtensions
         services.AddSingleton<IConfigStore, JsonConfigStore>();
         services.AddSingleton<RouteMatrix>();
         services.AddSingleton<TrafficAnalyzer>();
+        services.AddSingleton<IMidiMessageLog, RingBufferMidiMessageLog>();
+
+#if WINDOWS
+        services.AddSingleton<IMidiEndpointCatalog, WinRtMidiEndpointCatalog>();
+        services.AddSingleton<IMidiSession, WinRtMidiSession>();
+#else
         services.AddSingleton<IMidiEndpointCatalog, InMemoryMidiEndpointCatalog>();
+        services.AddSingleton<IMidiSession, InMemoryMidiSession>();
+#endif
+
+        services.AddSingleton<MidiRoutingWorker>();
+        services.AddHostedService<MidiRuntimeHostedService>();
 
         return services;
     }

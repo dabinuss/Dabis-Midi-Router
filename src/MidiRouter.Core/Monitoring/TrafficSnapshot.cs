@@ -5,4 +5,9 @@ public sealed record TrafficSnapshot(
     double MessagesPerSecond,
     double BytesPerSecond,
     IReadOnlyCollection<int> ActiveChannels,
-    DateTimeOffset CapturedAtUtc);
+    DateTimeOffset CapturedAtUtc)
+{
+    public string ActiveChannelsText => ActiveChannels.Count == 0
+        ? "-"
+        : string.Join(", ", ActiveChannels);
+}

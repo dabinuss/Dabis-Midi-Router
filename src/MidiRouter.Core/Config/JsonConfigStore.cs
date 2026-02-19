@@ -21,11 +21,21 @@ public sealed class JsonConfigStore(ConfigStoreOptions options) : IConfigStore
             return defaultConfig;
         }
 
-        await using var stream = File.OpenRead(options.ConfigPath);
-        var config = await JsonSerializer.DeserializeAsync<AppConfig>(stream, SerializerOptions, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            await using var stream = File.OpenRead(options.ConfigPath);
+            var config = await JsonSerializer.DeserializeAsync<AppConfig>(stream, SerializerOptions, cancellationToken)
+                .ConfigureAwait(false);
 
-        return config ?? new AppConfig();
+            return config ?? new AppConfig();
+        }
+        catch (JsonException)
+        {
+            BackupCorruptedConfig();
+            var defaultConfig = new AppConfig();
+            await SaveAsync(defaultConfig, cancellationToken).ConfigureAwait(false);
+            return defaultConfig;
+        }
     }
 
     public async Task SaveAsync(AppConfig config, CancellationToken cancellationToken = default)
@@ -34,9 +44,26 @@ public sealed class JsonConfigStore(ConfigStoreOptions options) : IConfigStore
 
         EnsureConfigDirectory();
 
-        await using var stream = File.Create(options.ConfigPath);
-        await JsonSerializer.SerializeAsync(stream, config, SerializerOptions, cancellationToken)
-            .ConfigureAwait(false);
+        var targetPath = options.ConfigPath;
+        var tempPath = $"{targetPath}.{Guid.NewGuid():N}.tmp";
+
+        try
+        {
+            await using (var stream = File.Create(tempPath))
+            {
+                await JsonSerializer.SerializeAsync(stream, config, SerializerOptions, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            File.Move(tempPath, targetPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
     }
 
     private void EnsureConfigDirectory()
@@ -46,5 +73,16 @@ public sealed class JsonConfigStore(ConfigStoreOptions options) : IConfigStore
         {
             Directory.CreateDirectory(directory);
         }
+    }
+
+    private void BackupCorruptedConfig()
+    {
+        if (!File.Exists(options.ConfigPath))
+        {
+            return;
+        }
+
+        var backupPath = $"{options.ConfigPath}.corrupt-{DateTime.UtcNow:yyyyMMddHHmmss}.bak";
+        File.Move(options.ConfigPath, backupPath, overwrite: true);
     }
 }

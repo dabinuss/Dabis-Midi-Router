@@ -10,6 +10,8 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="12" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="12" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -24,6 +26,20 @@
         </StackPanel>
 
         <DataGrid Grid.Row="2"
+                  AutoGenerateColumns="False"
+                  CanUserAddRows="False"
+                  ItemsSource="{Binding TrafficSnapshots}"
+                  IsReadOnly="True"
+                  MaxHeight="160">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Endpoint" Binding="{Binding EndpointId}" Width="2*" />
+                <DataGridTextColumn Header="Msgs/s" Binding="{Binding MessagesPerSecond, StringFormat=F1}" Width="*" />
+                <DataGridTextColumn Header="Bytes/s" Binding="{Binding BytesPerSecond, StringFormat=F1}" Width="*" />
+                <DataGridTextColumn Header="Channels" Binding="{Binding ActiveChannelsText}" Width="2*" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <DataGrid Grid.Row="4"
                   AutoGenerateColumns="False"
                   CanUserAddRows="False"
                   ItemsSource="{Binding Entries}"

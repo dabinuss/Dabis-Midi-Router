@@ -28,6 +28,14 @@ public sealed class TrafficAnalyzer
         return counter.CreateSnapshot(endpointId);
     }
 
+    public IReadOnlyList<TrafficSnapshot> GetAllSnapshots()
+    {
+        return _counters
+            .Select(pair => pair.Value.CreateSnapshot(pair.Key))
+            .OrderBy(snapshot => snapshot.EndpointId)
+            .ToList();
+    }
+
     private sealed class EndpointCounter
     {
         private readonly object _syncRoot = new();

@@ -9,8 +9,12 @@
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="10" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="12" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="12" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <StackPanel Orientation="Horizontal">
@@ -19,7 +23,7 @@
                       DisplayMemberPath="Name"
                       SelectedValuePath="Id"
                       SelectedValue="{Binding SelectedSourceEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                      ItemsSource="{Binding Endpoints}" />
+                      ItemsSource="{Binding SourceEndpoints}" />
             <TextBlock VerticalAlignment="Center"
                        Margin="0,0,8,0"
                        Text="->" />
@@ -28,21 +32,59 @@
                       DisplayMemberPath="Name"
                       SelectedValuePath="Id"
                       SelectedValue="{Binding SelectedTargetEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                      ItemsSource="{Binding Endpoints}" />
+                      ItemsSource="{Binding TargetEndpoints}" />
             <Button Content="Route hinzufügen"
                     Command="{Binding AddRouteCommand}"
+                    MinWidth="140"
+                    Margin="0,0,8,0" />
+            <Button Content="Ports aktualisieren"
+                    Command="{Binding RefreshEndpointsAsyncCommand}"
                     MinWidth="140" />
         </StackPanel>
 
-        <DataGrid Grid.Row="2"
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBox Grid.Column="0"
+                     Margin="0,0,8,0"
+                     Text="{Binding NewLoopbackName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+            <Button Grid.Column="1"
+                    Content="Loopback erstellen"
+                    Command="{Binding CreateLoopbackAsyncCommand}"
+                    Margin="0,0,8,0"
+                    MinWidth="160" />
+
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <ComboBox Width="220"
+                          Margin="0,0,8,0"
+                          DisplayMemberPath="Name"
+                          SelectedValuePath="Id"
+                          SelectedValue="{Binding SelectedLoopbackEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                          ItemsSource="{Binding LoopbackEndpoints}" />
+                <Button Content="Loopback löschen"
+                        Command="{Binding DeleteLoopbackAsyncCommand}"
+                        MinWidth="160" />
+            </StackPanel>
+        </Grid>
+
+        <DataGrid Grid.Row="4"
                   AutoGenerateColumns="False"
                   CanUserAddRows="False"
                   ItemsSource="{Binding Routes}"
-                  IsReadOnly="True">
+                  IsReadOnly="True"
+                  SelectedValuePath="Id"
+                  SelectedValue="{Binding SelectedRouteId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Source" Binding="{Binding SourceEndpointId}" Width="2*" />
-                <DataGridTextColumn Header="Target" Binding="{Binding TargetEndpointId}" Width="2*" />
+                <DataGridTextColumn Header="Source" Binding="{Binding SourceName}" Width="2*" />
+                <DataGridTextColumn Header="Target" Binding="{Binding TargetName}" Width="2*" />
                 <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled}" Width="Auto" />
+                <DataGridTextColumn Header="Kanäle" Binding="{Binding Channels}" Width="2*" />
+                <DataGridTextColumn Header="Typen" Binding="{Binding MessageTypes}" Width="2*" />
                 <DataGridTemplateColumn Header="Action" Width="Auto">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
@@ -55,5 +97,50 @@
                 </DataGridTemplateColumn>
             </DataGrid.Columns>
         </DataGrid>
+
+        <Border Grid.Row="6"
+                BorderBrush="#22000000"
+                BorderThickness="1"
+                Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="220" />
+                    <ColumnDefinition Width="16" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="260" />
+                    <ColumnDefinition Width="16" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="260" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Aktiv:" Margin="0,0,8,0" />
+                <CheckBox Grid.Column="1"
+                          VerticalAlignment="Center"
+                          IsChecked="{Binding SelectedRouteEnabled, Mode=TwoWay}" />
+
+                <TextBlock Grid.Column="3" VerticalAlignment="Center" Text="Kanäle:" Margin="0,0,8,0" />
+                <TextBox Grid.Column="4"
+                         VerticalAlignment="Center"
+                         Text="{Binding SelectedRouteChannelsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <TextBlock Grid.Column="6" VerticalAlignment="Center" Text="Typen:" Margin="0,0,8,0" />
+                <TextBox Grid.Column="7"
+                         VerticalAlignment="Center"
+                         Text="{Binding SelectedRouteMessageTypesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <Button Grid.Column="8"
+                        Content="Route übernehmen"
+                        Command="{Binding ApplyRouteSettingsCommand}"
+                        HorizontalAlignment="Right"
+                        MinWidth="160" />
+            </Grid>
+        </Border>
+
+        <TextBlock Grid.Row="6"
+                   Margin="10,44,0,0"
+                   Foreground="#B00020"
+                   Text="{Binding ValidationMessage}" />
     </Grid>
 </UserControl>

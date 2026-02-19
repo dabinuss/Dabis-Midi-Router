@@ -49,4 +49,29 @@ public class JsonConfigStoreTests
         Assert.Single(loaded.Profiles[0].Routes);
         Assert.Equal("loop:1", loaded.Profiles[0].Routes[0].SourceEndpointId);
     }
+
+    [Fact]
+    public async Task LoadAsync_RecoversFromCorruptedJsonAndCreatesBackup()
+    {
+        var tempDirectory = Path.Combine(Path.GetTempPath(), "MidiRouterTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDirectory);
+        var configPath = Path.Combine(tempDirectory, "config.json");
+
+        await File.WriteAllTextAsync(configPath, "{ invalid json");
+
+        var store = new JsonConfigStore(new ConfigStoreOptions
+        {
+            ConfigPath = configPath
+        });
+
+        var loaded = await store.LoadAsync();
+
+        Assert.Equal("Default", loaded.ActiveProfileName);
+        Assert.True(File.Exists(configPath));
+
+        var backupFile = Directory
+            .GetFiles(tempDirectory, "config.json.corrupt-*.bak")
+            .SingleOrDefault();
+        Assert.False(string.IsNullOrWhiteSpace(backupFile));
+    }
 }
