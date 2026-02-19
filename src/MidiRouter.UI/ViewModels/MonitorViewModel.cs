@@ -269,7 +269,7 @@ public partial class MonitorViewModel : ObservableObject
 
     private void RefreshSnapshots()
     {
-        var snapshots = _trafficAnalyzer.GetAllSnapshots();
+        var snapshots = _trafficAnalyzer.PeekAllSnapshots();
         RunOnUiThread(() =>
         {
             TrafficSnapshots.Clear();

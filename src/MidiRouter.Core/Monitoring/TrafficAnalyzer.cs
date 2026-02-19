@@ -36,6 +36,14 @@ public sealed class TrafficAnalyzer
             .ToList();
     }
 
+    public IReadOnlyList<TrafficSnapshot> PeekAllSnapshots()
+    {
+        return _counters
+            .Select(pair => pair.Value.PeekSnapshot(pair.Key))
+            .OrderBy(snapshot => snapshot.EndpointId)
+            .ToList();
+    }
+
     private sealed class EndpointCounter
     {
         private readonly object _syncRoot = new();
@@ -81,6 +89,22 @@ public sealed class TrafficAnalyzer
                 _windowStart = now;
 
                 return snapshot;
+            }
+        }
+
+        public TrafficSnapshot PeekSnapshot(string endpointId)
+        {
+            lock (_syncRoot)
+            {
+                var now = DateTimeOffset.UtcNow;
+                var elapsedSeconds = Math.Max((now - _windowStart).TotalSeconds, 0.001);
+
+                return new TrafficSnapshot(
+                    endpointId,
+                    MessagesPerSecond: _messageCount / elapsedSeconds,
+                    BytesPerSecond: _byteCount / elapsedSeconds,
+                    ActiveChannels: _activeChannels.OrderBy(x => x).ToArray(),
+                    CapturedAtUtc: now);
             }
         }
     }

@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MidiRouter.Core.Engine;
+using MidiRouter.Core.Monitoring;
 using MidiRouter.Core.Routing;
 
 namespace MidiRouter.UI.ViewModels;
@@ -19,7 +21,12 @@ public partial class RoutingViewModel : ObservableObject
 
     private readonly RouteMatrix _routeMatrix;
     private readonly IMidiEndpointCatalog _endpointCatalog;
+    private readonly TrafficAnalyzer _trafficAnalyzer;
+    private readonly DispatcherTimer _trafficRefreshTimer;
     private readonly Dictionary<string, long> _createdPortPriority = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _portListPrimaryByEndpointId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<string>> _portListMemberIdsByPrimaryId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, double> _latestBytesPerSecondByEndpointId = new(StringComparer.OrdinalIgnoreCase);
     private long _createdPortCounter;
 
     [ObservableProperty]
@@ -76,10 +83,11 @@ public partial class RoutingViewModel : ObservableObject
     [ObservableProperty]
     private string _selectedRouteSummary = "Keine Route ausgewahlt.";
 
-    public RoutingViewModel(RouteMatrix routeMatrix, IMidiEndpointCatalog endpointCatalog)
+    public RoutingViewModel(RouteMatrix routeMatrix, IMidiEndpointCatalog endpointCatalog, TrafficAnalyzer trafficAnalyzer)
     {
         _routeMatrix = routeMatrix;
         _endpointCatalog = endpointCatalog;
+        _trafficAnalyzer = trafficAnalyzer;
 
         _routeMatrix.RoutesChanged += (_, _) => RunOnUiThread(RefreshRoutes);
         _endpointCatalog.EndpointsChanged += (_, _) => RunOnUiThread(() =>
@@ -88,11 +96,22 @@ public partial class RoutingViewModel : ObservableObject
             RefreshRoutes();
         });
 
+        _trafficRefreshTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _trafficRefreshTimer.Tick += (_, _) => PollTrafficRatesAndRefreshColumns();
+        _trafficRefreshTimer.Start();
+
         RefreshPorts();
         RefreshRoutes();
     }
 
     public ObservableCollection<PortRow> Ports { get; } = [];
+
+    public ObservableCollection<PortRow> AppPorts { get; } = [];
+
+    public ObservableCollection<PortRow> SystemPorts { get; } = [];
 
     public ObservableCollection<RouteEndpointRow> LeftRoutePorts { get; } = [];
 
@@ -607,28 +626,61 @@ public partial class RoutingViewModel : ObservableObject
             .ToList();
 
         var selectedPortId = SelectedPort?.Id;
+        var bytesPerSecondByEndpointId = _latestBytesPerSecondByEndpointId;
 
         Ports.Clear();
+        AppPorts.Clear();
+        SystemPorts.Clear();
         LeftRoutePorts.Clear();
         RightRoutePorts.Clear();
+
+        _portListPrimaryByEndpointId.Clear();
+        _portListMemberIdsByPrimaryId.Clear();
+
+        var portRows = new Dictionary<string, PortAggregationState>(StringComparer.OrdinalIgnoreCase);
+        var portOrder = new List<string>();
 
         foreach (var endpoint in filteredEndpoints)
         {
             var displayName = FormatPortDisplayName(endpoint);
+            var listDisplayName = GetPortListDisplayName(endpoint, displayName);
             var direction = GetDirection(endpoint);
             var owner = endpoint.IsUserManaged ? PortOwnerApp : PortOwnerSystem;
             var status = endpoint.IsOnline ? "Online" : "Offline";
+            var type = endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System";
 
-            var port = new PortRow(
-                endpoint.Id,
-                displayName,
-                endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System",
-                direction,
-                status,
-                owner,
-                endpoint.IsUserManaged);
+            var groupKey = BuildPortListGroupKey(endpoint, listDisplayName, type, owner);
+            if (!portRows.TryGetValue(groupKey, out var aggregate))
+            {
+                aggregate = new PortAggregationState(
+                    endpoint.Id,
+                    listDisplayName,
+                    endpoint.IsUserManaged,
+                    endpoint.SupportsInput,
+                    endpoint.SupportsOutput,
+                    endpoint.IsOnline,
+                    endpoint.IsOnline,
+                    ResolveBytesPerSecond(endpoint.Id, bytesPerSecondByEndpointId));
+                portRows[groupKey] = aggregate;
+                portOrder.Add(groupKey);
+            }
+            else
+            {
+                aggregate.SupportsInput |= endpoint.SupportsInput;
+                aggregate.SupportsOutput |= endpoint.SupportsOutput;
+                aggregate.AnyOnline |= endpoint.IsOnline;
+                aggregate.AllOnline &= endpoint.IsOnline;
+                aggregate.BytesPerSecond += ResolveBytesPerSecond(endpoint.Id, bytesPerSecondByEndpointId);
+            }
 
-            Ports.Add(port);
+            _portListPrimaryByEndpointId[endpoint.Id] = aggregate.PrimaryId;
+            if (!_portListMemberIdsByPrimaryId.TryGetValue(aggregate.PrimaryId, out var memberIds))
+            {
+                memberIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _portListMemberIdsByPrimaryId[aggregate.PrimaryId] = memberIds;
+            }
+
+            memberIds.Add(endpoint.Id);
 
             if (endpoint.SupportsInput)
             {
@@ -653,9 +705,36 @@ public partial class RoutingViewModel : ObservableObject
             }
         }
 
-        SelectedPort = selectedPortId is null
+        foreach (var groupKey in portOrder)
+        {
+            var aggregate = portRows[groupKey];
+            var row = new PortRow(
+                aggregate.PrimaryId,
+                aggregate.Name,
+                GetDirection(aggregate.SupportsInput, aggregate.SupportsOutput),
+                aggregate.IsUserManaged ? FormatByteRate(aggregate.BytesPerSecond) : "-",
+                aggregate.IsUserManaged);
+
+            Ports.Add(row);
+            if (row.IsUserManaged)
+            {
+                AppPorts.Add(row);
+            }
+            else
+            {
+                SystemPorts.Add(row);
+            }
+        }
+
+        var mappedSelectedPortId = selectedPortId is null
+            ? null
+            : _portListPrimaryByEndpointId.TryGetValue(selectedPortId, out var primaryId)
+                ? primaryId
+                : selectedPortId;
+
+        SelectedPort = mappedSelectedPortId is null
             ? Ports.FirstOrDefault()
-            : Ports.FirstOrDefault(port => string.Equals(port.Id, selectedPortId, StringComparison.OrdinalIgnoreCase))
+            : Ports.FirstOrDefault(port => string.Equals(port.Id, mappedSelectedPortId, StringComparison.OrdinalIgnoreCase))
               ?? Ports.FirstOrDefault();
 
         if (SelectedSourceEndpointId is null || LeftRoutePorts.All(endpoint => endpoint.Id != SelectedSourceEndpointId))
@@ -837,7 +916,11 @@ public partial class RoutingViewModel : ObservableObject
 
     private void SyncSelectedPortFromEndpointId(string endpointId)
     {
-        var selected = Ports.FirstOrDefault(port => string.Equals(port.Id, endpointId, StringComparison.OrdinalIgnoreCase));
+        var resolvedEndpointId = _portListPrimaryByEndpointId.TryGetValue(endpointId, out var primaryId)
+            ? primaryId
+            : endpointId;
+
+        var selected = Ports.FirstOrDefault(port => string.Equals(port.Id, resolvedEndpointId, StringComparison.OrdinalIgnoreCase));
         if (selected is not null)
         {
             SelectedPort = selected;
@@ -868,13 +951,114 @@ public partial class RoutingViewModel : ObservableObject
 
     private static string GetDirection(MidiEndpointDescriptor endpoint)
     {
-        return endpoint switch
+        return GetDirection(endpoint.SupportsInput, endpoint.SupportsOutput);
+    }
+
+    private static string GetDirection(bool supportsInput, bool supportsOutput)
+    {
+        return (supportsInput, supportsOutput) switch
         {
-            { SupportsInput: true, SupportsOutput: true } => PortDirectionInOut,
-            { SupportsInput: true } => PortDirectionInput,
-            { SupportsOutput: true } => PortDirectionOutput,
+            (true, true) => PortDirectionInOut,
+            (true, false) => PortDirectionInput,
+            (false, true) => PortDirectionOutput,
             _ => "-"
         };
+    }
+
+    private static string BuildPortListGroupKey(MidiEndpointDescriptor endpoint, string displayName, string type, string owner)
+    {
+        return $"{(endpoint.IsUserManaged ? "managed" : "system")}|{type}|{owner}|{displayName}";
+    }
+
+    private void RefreshTrafficColumns()
+    {
+        var bytesPerSecondByEndpointId = _latestBytesPerSecondByEndpointId;
+
+        RefreshTrafficColumn(Ports, bytesPerSecondByEndpointId);
+        RefreshTrafficColumn(AppPorts, bytesPerSecondByEndpointId);
+        RefreshTrafficColumn(SystemPorts, bytesPerSecondByEndpointId);
+    }
+
+    private void PollTrafficRatesAndRefreshColumns()
+    {
+        var snapshots = _trafficAnalyzer.GetAllSnapshots();
+
+        _latestBytesPerSecondByEndpointId.Clear();
+        foreach (var snapshot in snapshots)
+        {
+            _latestBytesPerSecondByEndpointId[snapshot.EndpointId] = Math.Max(0, snapshot.BytesPerSecond);
+        }
+
+        RefreshTrafficColumns();
+    }
+
+    private void RefreshTrafficColumn(ObservableCollection<PortRow> rows, IReadOnlyDictionary<string, double> bytesPerSecondByEndpointId)
+    {
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            var formatted = row.IsUserManaged
+                ? FormatByteRate(GetBytesPerSecondForPortRow(row.Id, bytesPerSecondByEndpointId))
+                : "-";
+            if (!string.Equals(row.SentData, formatted, StringComparison.Ordinal))
+            {
+                rows[i] = row with { SentData = formatted };
+            }
+        }
+    }
+
+    private double GetBytesPerSecondForPortRow(string primaryPortId, IReadOnlyDictionary<string, double> bytesPerSecondByEndpointId)
+    {
+        if (!_portListMemberIdsByPrimaryId.TryGetValue(primaryPortId, out var memberIds))
+        {
+            return ResolveBytesPerSecond(primaryPortId, bytesPerSecondByEndpointId);
+        }
+
+        var total = 0d;
+        foreach (var memberId in memberIds)
+        {
+            total += ResolveBytesPerSecond(memberId, bytesPerSecondByEndpointId);
+        }
+
+        return total;
+    }
+
+    private static double ResolveBytesPerSecond(string endpointId, IReadOnlyDictionary<string, double> bytesPerSecondByEndpointId)
+    {
+        return bytesPerSecondByEndpointId.TryGetValue(endpointId, out var bytesPerSecond)
+            ? Math.Max(0, bytesPerSecond)
+            : 0d;
+    }
+
+    private static string FormatByteRate(double bytesPerSecond)
+    {
+        if (bytesPerSecond < 1024d)
+        {
+            return $"{bytesPerSecond:0.0} B/s";
+        }
+
+        if (bytesPerSecond < 1024d * 1024d)
+        {
+            return $"{bytesPerSecond / 1024d:0.00} KB/s";
+        }
+
+        return $"{bytesPerSecond / (1024d * 1024d):0.00} MB/s";
+    }
+
+    private static string GetPortListDisplayName(MidiEndpointDescriptor endpoint, string displayName)
+    {
+        if (!endpoint.IsUserManaged)
+        {
+            return displayName;
+        }
+
+        if (displayName.EndsWith(" (A)", StringComparison.OrdinalIgnoreCase) ||
+            displayName.EndsWith(" (B)", StringComparison.OrdinalIgnoreCase))
+        {
+            return displayName[..^4].TrimEnd();
+        }
+
+        return displayName;
     }
 
     private static string FormatPortDisplayName(MidiEndpointDescriptor endpoint)
@@ -967,10 +1151,8 @@ public partial class RoutingViewModel : ObservableObject
     public sealed record PortRow(
         string Id,
         string Name,
-        string Type,
         string Direction,
-        string Status,
-        string Owner,
+        string SentData,
         bool IsUserManaged);
 
     public sealed record RouteEndpointRow(
@@ -990,4 +1172,43 @@ public partial class RoutingViewModel : ObservableObject
         bool Enabled,
         string Channels,
         string MessageTypes);
+
+    private sealed class PortAggregationState
+    {
+        public PortAggregationState(
+            string primaryId,
+            string name,
+            bool isUserManaged,
+            bool supportsInput,
+            bool supportsOutput,
+            bool anyOnline,
+            bool allOnline,
+            double bytesPerSecond)
+        {
+            PrimaryId = primaryId;
+            Name = name;
+            IsUserManaged = isUserManaged;
+            SupportsInput = supportsInput;
+            SupportsOutput = supportsOutput;
+            AnyOnline = anyOnline;
+            AllOnline = allOnline;
+            BytesPerSecond = bytesPerSecond;
+        }
+
+        public string PrimaryId { get; }
+
+        public string Name { get; }
+
+        public bool IsUserManaged { get; }
+
+        public bool SupportsInput { get; set; }
+
+        public bool SupportsOutput { get; set; }
+
+        public bool AnyOnline { get; set; }
+
+        public bool AllOnline { get; set; }
+
+        public double BytesPerSecond { get; set; }
+    }
 }

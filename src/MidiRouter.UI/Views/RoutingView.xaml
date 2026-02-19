@@ -84,17 +84,13 @@
                             Grid.ColumnSpan="3"
                             Orientation="Horizontal"
                             VerticalAlignment="Center">
-                    <CheckBox Content="System-Ports ausblenden"
-                              IsChecked="{Binding HideSystemPorts, Mode=TwoWay}"
-                              Margin="0,0,12,0" />
+                    <TextBlock Text="Filter:"
+                               VerticalAlignment="Center"
+                               Margin="0,0,8,0" />
                     <TextBox Width="220"
                              Margin="0,0,8,0"
                              ToolTip="Suche in Name, ID, Typ, Eigentumer, Richtung"
                              Text="{Binding PortSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                    <ComboBox Width="160"
-                              Margin="0,0,8,0"
-                              ItemsSource="{Binding PortOwnerFilters}"
-                              SelectedItem="{Binding SelectedPortOwnerFilter, Mode=TwoWay}" />
                     <ComboBox Width="160"
                               ItemsSource="{Binding PortDirectionFilters}"
                               SelectedItem="{Binding SelectedPortDirectionFilter, Mode=TwoWay}" />
@@ -102,29 +98,85 @@
             </Grid>
         </Border>
 
-        <DataGrid Grid.Row="4"
-                  AutoGenerateColumns="False"
-                  CanUserAddRows="False"
-                  IsReadOnly="True"
-                  ItemsSource="{Binding Ports}"
-                  SelectedItem="{Binding SelectedPort, Mode=TwoWay}"
-                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
-            <DataGrid.Columns>
-                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
-                <DataGridTextColumn Header="Typ" Binding="{Binding Type}" Width="*" />
-                <DataGridTextColumn Header="Richtung" Binding="{Binding Direction}" Width="*" />
-                <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="*" />
-                <DataGridTextColumn Header="Eigentumer" Binding="{Binding Owner}" Width="*" />
-                <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="3*" />
-            </DataGrid.Columns>
-        </DataGrid>
-
-        <Border Grid.Row="6"
+        <Border Grid.Row="4"
                 BorderBrush="#33000000"
                 BorderThickness="1"
                 Padding="10">
-            <Grid x:Name="RouteDesignerGrid"
-                  SizeChanged="OnRouteDesignerSizeChanged">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="10" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="6" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Column="0"
+                           FontWeight="SemiBold"
+                           Text="Eigene Ports" />
+                <TextBlock Grid.Column="2"
+                           FontWeight="SemiBold"
+                           Text="Systemports" />
+
+                <DataGrid Grid.Row="2"
+                          Grid.Column="0"
+                          AutoGenerateColumns="False"
+                          CanUserAddRows="False"
+                          IsReadOnly="True"
+                          ItemsSource="{Binding AppPorts}"
+                          SelectedItem="{Binding SelectedPort, Mode=TwoWay}"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
+                        <DataGridTextColumn Header="Richtung" Binding="{Binding Direction}" Width="*" />
+                        <DataGridTextColumn Header="Gesendet" Binding="{Binding SentData}" Width="*" />
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <DataGrid Grid.Row="2"
+                          Grid.Column="2"
+                          AutoGenerateColumns="False"
+                          CanUserAddRows="False"
+                          IsReadOnly="True"
+                          ItemsSource="{Binding SystemPorts}"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
+                        <DataGridTextColumn Header="Richtung" Binding="{Binding Direction}" Width="*" />
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="6"
+                BorderBrush="#335F7A"
+                BorderThickness="1.5"
+                CornerRadius="6"
+                Padding="10"
+                Background="#F8FBFF">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="8" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0"
+                        Background="#E6EFF8"
+                        BorderBrush="#335F7A"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="8,6">
+                    <TextBlock FontWeight="SemiBold"
+                               Text="Routing-Visuals" />
+                </Border>
+
+                <Grid x:Name="RouteDesignerGrid"
+                      Grid.Row="2"
+                      SizeChanged="OnRouteDesignerSizeChanged">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="2.2*" />
                     <ColumnDefinition Width="1.6*" />
@@ -307,6 +359,7 @@
                         </ListBox>
                     </DockPanel>
                 </Border>
+                </Grid>
             </Grid>
         </Border>
 
