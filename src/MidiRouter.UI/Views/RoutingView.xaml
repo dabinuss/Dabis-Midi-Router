@@ -60,7 +60,8 @@
                     <TextBox Width="220"
                              Margin="0,0,8,0"
                              Text="{Binding NewPortName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                    <Button Content="Port erstellen"
+                    <Button Content="Interner Port erstellen"
+                            ToolTip="Erstellt einen app-internen Loopback-Port (nicht als globaler Windows-MIDI-Port sichtbar)."
                             Command="{Binding CreatePortCommand}"
                             MinWidth="130" />
                 </StackPanel>

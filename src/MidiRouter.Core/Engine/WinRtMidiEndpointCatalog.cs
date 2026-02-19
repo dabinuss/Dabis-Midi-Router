@@ -1,4 +1,6 @@
 #if WINDOWS
+using System.Text.Json;
+using MidiRouter.Core.Config;
 using NAudio.Midi;
 using System.Collections.ObjectModel;
 using Windows.Devices.Enumeration;
@@ -8,14 +10,35 @@ namespace MidiRouter.Core.Engine;
 
 public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 {
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
+
     private readonly object _syncRoot = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly Dictionary<string, HardwareEndpointState> _hardwareEndpoints = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, MidiEndpointDescriptor> _loopbackEndpoints = new(StringComparer.OrdinalIgnoreCase);
+    private readonly string _loopbackStorePath;
 
     private DeviceWatcher? _inputWatcher;
     private DeviceWatcher? _outputWatcher;
     private bool _watchersStarted;
+
+    public WinRtMidiEndpointCatalog(ConfigStoreOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var configDirectory = Path.GetDirectoryName(options.ConfigPath);
+        if (string.IsNullOrWhiteSpace(configDirectory))
+        {
+            configDirectory = AppContext.BaseDirectory;
+        }
+
+        _loopbackStorePath = Path.Combine(configDirectory, "loopback-endpoints.json");
+        LoadPersistedLoopbackEndpoints();
+    }
 
     public event EventHandler? EndpointsChanged;
 
@@ -101,18 +124,29 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var endpoint = new MidiEndpointDescriptor(
+        var endpoint = CreateLoopbackDescriptor(
             $"loop:{Guid.NewGuid():N}",
-            string.IsNullOrWhiteSpace(name) ? $"Loopback {DateTime.Now:HHmmss}" : name.Trim(),
-            MidiEndpointKind.Loopback,
-            SupportsInput: true,
-            SupportsOutput: true,
-            IsOnline: true,
-            IsUserManaged: true);
+            string.IsNullOrWhiteSpace(name) ? $"Loopback {DateTime.Now:HHmmss}" : name.Trim());
 
+        List<PersistedLoopbackEndpoint> persistedSnapshot;
         lock (_syncRoot)
         {
             _loopbackEndpoints[endpoint.Id] = endpoint;
+            persistedSnapshot = SnapshotLoopbackEndpointsUnsafe();
+        }
+
+        try
+        {
+            PersistLoopbackEndpoints(persistedSnapshot);
+        }
+        catch
+        {
+            lock (_syncRoot)
+            {
+                _loopbackEndpoints.Remove(endpoint.Id);
+            }
+
+            throw;
         }
 
         EndpointsChanged?.Invoke(this, EventArgs.Empty);
@@ -129,13 +163,36 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         }
 
         bool removed;
+        MidiEndpointDescriptor? removedEndpoint = null;
+        List<PersistedLoopbackEndpoint> persistedSnapshot = [];
         lock (_syncRoot)
         {
-            removed = _loopbackEndpoints.Remove(endpointId);
+            removed = _loopbackEndpoints.Remove(endpointId, out removedEndpoint);
+            if (removed)
+            {
+                persistedSnapshot = SnapshotLoopbackEndpointsUnsafe();
+            }
         }
 
         if (removed)
         {
+            try
+            {
+                PersistLoopbackEndpoints(persistedSnapshot);
+            }
+            catch
+            {
+                lock (_syncRoot)
+                {
+                    if (removedEndpoint is not null)
+                    {
+                        _loopbackEndpoints[removedEndpoint.Id] = removedEndpoint;
+                    }
+                }
+
+                throw;
+            }
+
             EndpointsChanged?.Invoke(this, EventArgs.Empty);
         }
 
@@ -153,6 +210,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 
         bool renamed;
         var safeName = newName.Trim();
+        MidiEndpointDescriptor? previousEndpoint = null;
+        List<PersistedLoopbackEndpoint> persistedSnapshot = [];
 
         lock (_syncRoot)
         {
@@ -161,16 +220,35 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                 return Task.FromResult(false);
             }
 
+            previousEndpoint = existing;
             _loopbackEndpoints[endpointId] = existing with
             {
                 Name = safeName
             };
 
             renamed = true;
+            persistedSnapshot = SnapshotLoopbackEndpointsUnsafe();
         }
 
         if (renamed)
         {
+            try
+            {
+                PersistLoopbackEndpoints(persistedSnapshot);
+            }
+            catch
+            {
+                lock (_syncRoot)
+                {
+                    if (previousEndpoint is not null)
+                    {
+                        _loopbackEndpoints[endpointId] = previousEndpoint;
+                    }
+                }
+
+                throw;
+            }
+
             EndpointsChanged?.Invoke(this, EventArgs.Empty);
         }
 
@@ -345,6 +423,82 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         return string.IsNullOrWhiteSpace(device.Name) ? device.Id : device.Name;
     }
 
+    private void LoadPersistedLoopbackEndpoints()
+    {
+        if (!File.Exists(_loopbackStorePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var raw = File.ReadAllText(_loopbackStorePath);
+            var persisted = JsonSerializer.Deserialize<List<PersistedLoopbackEndpoint>>(raw, SerializerOptions) ?? [];
+
+            lock (_syncRoot)
+            {
+                _loopbackEndpoints.Clear();
+                foreach (var item in persisted)
+                {
+                    if (string.IsNullOrWhiteSpace(item.Id) || string.IsNullOrWhiteSpace(item.Name))
+                    {
+                        continue;
+                    }
+
+                    _loopbackEndpoints[item.Id] = CreateLoopbackDescriptor(item.Id, item.Name);
+                }
+            }
+        }
+        catch
+        {
+            // Ignore malformed persistence file and continue with runtime-only loopbacks.
+        }
+    }
+
+    private List<PersistedLoopbackEndpoint> SnapshotLoopbackEndpointsUnsafe()
+    {
+        return _loopbackEndpoints.Values
+            .OrderBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(endpoint => new PersistedLoopbackEndpoint(endpoint.Id, endpoint.Name))
+            .ToList();
+    }
+
+    private void PersistLoopbackEndpoints(IReadOnlyCollection<PersistedLoopbackEndpoint> endpoints)
+    {
+        var directory = Path.GetDirectoryName(_loopbackStorePath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var tempPath = $"{_loopbackStorePath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            var json = JsonSerializer.Serialize(endpoints, SerializerOptions);
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, _loopbackStorePath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
+    }
+
+    private static MidiEndpointDescriptor CreateLoopbackDescriptor(string endpointId, string name)
+    {
+        return new MidiEndpointDescriptor(
+            endpointId,
+            name,
+            MidiEndpointKind.Loopback,
+            SupportsInput: true,
+            SupportsOutput: true,
+            IsOnline: true,
+            IsUserManaged: true);
+    }
+
     private static void AppendWinMmEndpoints(IDictionary<string, HardwareEndpointState> snapshot)
     {
         for (var index = 0; index < MidiIn.NumberOfDevices; index++)
@@ -369,6 +523,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         bool SupportsInput,
         bool SupportsOutput,
         bool IsOnline);
+
+    private sealed record PersistedLoopbackEndpoint(string Id, string Name);
 }
 #endif
 

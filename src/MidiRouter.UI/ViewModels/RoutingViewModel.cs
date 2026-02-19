@@ -162,7 +162,7 @@ public partial class RoutingViewModel : ObservableObject
 
             SelectRoutePort(created.Id);
             EditPortFocusRequested?.Invoke(this, EventArgs.Empty);
-            ValidationMessage = $"Port '{created.Name}' erstellt.";
+            ValidationMessage = $"Interner Port '{created.Name}' erstellt.";
         }
         catch (Exception ex)
         {
