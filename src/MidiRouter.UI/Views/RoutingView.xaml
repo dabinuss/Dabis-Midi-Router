@@ -5,7 +5,11 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
              d:DesignHeight="450"
-             d:DesignWidth="800">
+             d:DesignWidth="800"
+             Focusable="True"
+             PreviewKeyDown="OnPreviewKeyDown"
+             PreviewMouseMove="OnRootPreviewMouseMove"
+             PreviewMouseLeftButtonUp="OnRootPreviewMouseLeftButtonUp">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -14,9 +18,8 @@
             <RowDefinition Height="8" />
             <RowDefinition Height="2*" />
             <RowDefinition Height="8" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="3*" />
             <RowDefinition Height="8" />
-            <RowDefinition Height="2*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
@@ -67,11 +70,11 @@
                              Width="220"
                              Margin="0,0,8,0"
                              Text="{Binding EditPortName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                    <Button Content="Port ändern"
+                    <Button Content="Port umbenennen"
                             Command="{Binding RenamePortCommand}"
-                            MinWidth="120"
+                            MinWidth="135"
                             Margin="0,0,8,0" />
-                    <Button Content="Port löschen"
+                    <Button Content="Port loschen"
                             Command="{Binding DeletePortCommand}"
                             MinWidth="120" />
                 </StackPanel>
@@ -85,7 +88,7 @@
                               Margin="0,0,12,0" />
                     <TextBox Width="220"
                              Margin="0,0,8,0"
-                             ToolTip="Suche in Name, ID, Typ, Eigentümer, Richtung"
+                             ToolTip="Suche in Name, ID, Typ, Eigentumer, Richtung"
                              Text="{Binding PortSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
                     <ComboBox Width="160"
                               Margin="0,0,8,0"
@@ -110,7 +113,7 @@
                 <DataGridTextColumn Header="Typ" Binding="{Binding Type}" Width="*" />
                 <DataGridTextColumn Header="Richtung" Binding="{Binding Direction}" Width="*" />
                 <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="*" />
-                <DataGridTextColumn Header="Eigentümer" Binding="{Binding Owner}" Width="*" />
+                <DataGridTextColumn Header="Eigentumer" Binding="{Binding Owner}" Width="*" />
                 <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="3*" />
             </DataGrid.Columns>
         </DataGrid>
@@ -119,101 +122,194 @@
                 BorderBrush="#33000000"
                 BorderThickness="1"
                 Padding="10">
-            <Grid>
+            <Grid x:Name="RouteDesignerGrid"
+                  SizeChanged="OnRouteDesignerSizeChanged">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="1*" />
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="2.2*" />
+                    <ColumnDefinition Width="1.6*" />
+                    <ColumnDefinition Width="2.2*" />
                 </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="6" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
 
-                <TextBlock Grid.ColumnSpan="6"
-                           FontWeight="SemiBold"
-                           Text="Routing" />
+                <Canvas x:Name="RoutingCanvas"
+                        Grid.ColumnSpan="3"
+                        Panel.ZIndex="0"
+                        ClipToBounds="True" />
+                <Canvas x:Name="DragPreviewCanvas"
+                        Grid.ColumnSpan="3"
+                        Panel.ZIndex="50"
+                        IsHitTestVisible="False"
+                        ClipToBounds="True" />
 
-                <ComboBox Grid.Row="2"
-                          Grid.Column="0"
-                          Margin="0,0,8,0"
-                          DisplayMemberPath="Name"
-                          SelectedValuePath="Id"
-                          SelectedValue="{Binding SelectedSourceEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                          ItemsSource="{Binding SourceEndpoints}" />
+                <Border Grid.Column="0"
+                        Panel.ZIndex="2"
+                        BorderBrush="#22000000"
+                        BorderThickness="1"
+                        Padding="8"
+                        Margin="0,0,8,0">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top"
+                                   FontWeight="SemiBold"
+                                   Margin="0,0,0,8"
+                                   Text="IN Ports (inkl. In/Out)" />
+                        <ListBox x:Name="LeftPortsListBox"
+                                 BorderThickness="0"
+                                 ScrollViewer.CanContentScroll="False"
+                                 VirtualizingStackPanel.IsVirtualizing="False"
+                                 ItemsSource="{Binding LeftRoutePorts}"
+                                 SelectedValuePath="Id"
+                                 SelectedValue="{Binding SelectedSourceEndpointId, Mode=TwoWay}">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Margin="0,2"
+                                            Padding="8,6"
+                                            BorderBrush="#22000000"
+                                            BorderThickness="1"
+                                            Background="#FAFAFA"
+                                            Tag="left"
+                                            Cursor="Hand"
+                                            PreviewMouseLeftButtonDown="OnRouteItemPreviewMouseLeftButtonDown">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
 
-                <ComboBox Grid.Row="2"
-                          Grid.Column="1"
-                          Margin="0,0,8,0"
-                          DisplayMemberPath="Name"
-                          SelectedValuePath="Id"
-                          SelectedValue="{Binding SelectedTargetEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                          ItemsSource="{Binding TargetEndpoints}" />
+                                            <StackPanel>
+                                                <TextBlock FontWeight="SemiBold"
+                                                           Text="{Binding Name}" />
+                                                <TextBlock FontSize="11"
+                                                           Foreground="#66000000"
+                                                           Text="{Binding Meta}" />
+                                            </StackPanel>
 
-                <CheckBox Grid.Row="2"
-                          Grid.Column="2"
-                          VerticalAlignment="Center"
-                          Content="Aktiv"
-                          IsChecked="{Binding RouteEnabled, Mode=TwoWay}" />
+                                            <Button Grid.Column="1"
+                                                    Width="24"
+                                                    Height="24"
+                                                    Margin="8,0,0,0"
+                                                    Content=">"
+                                                    Cursor="Hand"
+                                                    Tag="left"
+                                                    Loaded="OnConnectorLoaded"
+                                                    Unloaded="OnConnectorUnloaded"
+                                                    PreviewMouseLeftButtonDown="OnConnectorPreviewMouseLeftButtonDown"
+                                                    Click="OnConnectorClick" />
+                                            <Button Grid.Column="2"
+                                                    Width="24"
+                                                    Height="24"
+                                                    Margin="6,0,0,0"
+                                                    Content="x"
+                                                    Cursor="Hand"
+                                                    ToolTip="Verbindung loschen"
+                                                    Click="OnDeletePortRouteClick" />
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Border>
 
-                <TextBox Grid.Row="2"
-                         Grid.Column="3"
-                         Margin="8,0,8,0"
-                         Text="{Binding RouteChannelsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <Border Grid.Column="1"
+                        Panel.ZIndex="1"
+                        IsHitTestVisible="False"
+                        BorderBrush="#22000000"
+                        BorderThickness="1"
+                        Padding="8"
+                        Margin="4,0">
+                    <StackPanel>
+                        <TextBlock FontWeight="SemiBold"
+                                   Text="Routing Canvas" />
+                        <TextBlock Margin="0,6,0,0"
+                                   TextWrapping="Wrap"
+                                   Foreground="#66000000"
+                                   Text="Connector von links nach rechts (oder umgekehrt) ziehen. Linien zeigen aktive Routen direkt." />
+                    </StackPanel>
+                </Border>
 
-                <TextBox Grid.Row="2"
-                         Grid.Column="4"
-                         Margin="0,0,8,0"
-                         Text="{Binding RouteTypesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <Border Grid.Column="2"
+                        Panel.ZIndex="2"
+                        BorderBrush="#22000000"
+                        BorderThickness="1"
+                        Padding="8"
+                        Margin="8,0,0,0">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top"
+                                   FontWeight="SemiBold"
+                                   Margin="0,0,0,8"
+                                   Text="OUT Ports (inkl. In/Out)" />
+                        <ListBox x:Name="RightPortsListBox"
+                                 BorderThickness="0"
+                                 ScrollViewer.CanContentScroll="False"
+                                 VirtualizingStackPanel.IsVirtualizing="False"
+                                 ItemsSource="{Binding RightRoutePorts}"
+                                 SelectedValuePath="Id"
+                                 SelectedValue="{Binding SelectedTargetEndpointId, Mode=TwoWay}">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Margin="0,2"
+                                            Padding="8,6"
+                                            BorderBrush="#22000000"
+                                            BorderThickness="1"
+                                            Background="#FAFAFA"
+                                            Tag="right"
+                                            Cursor="Hand"
+                                            PreviewMouseLeftButtonDown="OnRouteItemPreviewMouseLeftButtonDown">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
 
-                <StackPanel Grid.Row="2" Grid.Column="5" Orientation="Horizontal">
-                    <Button Content="Neu"
-                            Command="{Binding NewRouteCommand}"
-                            MinWidth="70"
-                            Margin="0,0,8,0" />
-                    <Button Content="Speichern"
-                            Command="{Binding SaveRouteCommand}"
-                            MinWidth="90"
-                            Margin="0,0,8,0" />
-                    <Button Content="Entfernen"
-                            Command="{Binding DeleteRouteCommand}"
-                            MinWidth="90" />
-                </StackPanel>
+                                            <Button Grid.Column="0"
+                                                    Width="24"
+                                                    Height="24"
+                                                    Margin="0,0,8,0"
+                                                    Content="&lt;"
+                                                    Cursor="Hand"
+                                                    Tag="right"
+                                                    Loaded="OnConnectorLoaded"
+                                                    Unloaded="OnConnectorUnloaded"
+                                                    PreviewMouseLeftButtonDown="OnConnectorPreviewMouseLeftButtonDown"
+                                                    Click="OnConnectorClick" />
+                                            <Button Grid.Column="1"
+                                                    Width="24"
+                                                    Height="24"
+                                                    Margin="0,0,8,0"
+                                                    Content="x"
+                                                    Cursor="Hand"
+                                                    ToolTip="Verbindung loschen"
+                                                    Click="OnDeletePortRouteClick" />
+
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock FontWeight="SemiBold"
+                                                           Text="{Binding Name}" />
+                                                <TextBlock FontSize="11"
+                                                           Foreground="#66000000"
+                                                           Text="{Binding Meta}" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Border>
             </Grid>
         </Border>
 
-        <DataGrid Grid.Row="8"
-                  AutoGenerateColumns="False"
-                  CanUserAddRows="False"
-                  IsReadOnly="True"
-                  ItemsSource="{Binding Routes}"
-                  SelectedValuePath="Id"
-                  SelectedValue="{Binding SelectedRouteId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
-            <DataGrid.Columns>
-                <DataGridTextColumn Header="Source" Binding="{Binding SourceName}" Width="2*" />
-                <DataGridTextColumn Header="Target" Binding="{Binding TargetName}" Width="2*" />
-                <DataGridCheckBoxColumn Header="Aktiv" Binding="{Binding Enabled}" Width="*" />
-                <DataGridTextColumn Header="Kanäle" Binding="{Binding Channels}" Width="2*" />
-                <DataGridTextColumn Header="Typen" Binding="{Binding MessageTypes}" Width="2*" />
-                <DataGridTemplateColumn Header="Bearbeiten" Width="Auto">
-                    <DataGridTemplateColumn.CellTemplate>
-                        <DataTemplate>
-                            <Button Content="Laden"
-                                    Padding="8,2"
-                                    Command="{Binding DataContext.SelectRouteCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                                    CommandParameter="{Binding Id}" />
-                        </DataTemplate>
-                    </DataGridTemplateColumn.CellTemplate>
-                </DataGridTemplateColumn>
-            </DataGrid.Columns>
-        </DataGrid>
-
-        <TextBlock Grid.Row="9"
+        <TextBlock Grid.Row="8"
                    Margin="0,8,0,0"
                    Foreground="#B00020"
                    Text="{Binding ValidationMessage}" />

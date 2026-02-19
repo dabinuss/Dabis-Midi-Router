@@ -6,9 +6,9 @@
         xmlns:views="clr-namespace:MidiRouter.UI.Views;assembly=MidiRouter.UI"
         mc:Ignorable="d"
         Title="Dabis Midi Router"
-        Height="700"
+        Height="860"
         Width="1100"
-        MinHeight="550"
+        MinHeight="650"
         MinWidth="900">
     <DockPanel>
         <Border DockPanel.Dock="Top" Background="#121C2A" Padding="16,10">

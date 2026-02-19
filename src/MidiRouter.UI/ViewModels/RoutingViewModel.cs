@@ -9,7 +9,7 @@ namespace MidiRouter.UI.ViewModels;
 
 public partial class RoutingViewModel : ObservableObject
 {
-    private const string PortOwnerAll = "Alle Eigentümer";
+    private const string PortOwnerAll = "Alle Eigentumer";
     private const string PortOwnerSystem = "System";
     private const string PortOwnerApp = "App";
     private const string PortDirectionAll = "Alle Richtungen";
@@ -67,13 +67,26 @@ public partial class RoutingViewModel : ObservableObject
     [ObservableProperty]
     private Guid? _selectedRouteId;
 
+    [ObservableProperty]
+    private bool _showOnlySelectedPortRoutes;
+
+    [ObservableProperty]
+    private string? _selectedRoutePortId;
+
+    [ObservableProperty]
+    private string _selectedRouteSummary = "Keine Route ausgewahlt.";
+
     public RoutingViewModel(RouteMatrix routeMatrix, IMidiEndpointCatalog endpointCatalog)
     {
         _routeMatrix = routeMatrix;
         _endpointCatalog = endpointCatalog;
 
         _routeMatrix.RoutesChanged += (_, _) => RunOnUiThread(RefreshRoutes);
-        _endpointCatalog.EndpointsChanged += (_, _) => RunOnUiThread(RefreshPorts);
+        _endpointCatalog.EndpointsChanged += (_, _) => RunOnUiThread(() =>
+        {
+            RefreshPorts();
+            RefreshRoutes();
+        });
 
         RefreshPorts();
         RefreshRoutes();
@@ -81,9 +94,9 @@ public partial class RoutingViewModel : ObservableObject
 
     public ObservableCollection<PortRow> Ports { get; } = [];
 
-    public ObservableCollection<MidiEndpointDescriptor> SourceEndpoints { get; } = [];
+    public ObservableCollection<RouteEndpointRow> LeftRoutePorts { get; } = [];
 
-    public ObservableCollection<MidiEndpointDescriptor> TargetEndpoints { get; } = [];
+    public ObservableCollection<RouteEndpointRow> RightRoutePorts { get; } = [];
 
     public ObservableCollection<RouteRow> Routes { get; } = [];
 
@@ -117,11 +130,12 @@ public partial class RoutingViewModel : ObservableObject
             ValidationMessage = string.Empty;
             await _endpointCatalog.RefreshAsync();
             RefreshPorts();
-            ServiceHealthStatus = $"System-Ports geladen: {Ports.Count}";
+            RefreshRoutes();
+            ServiceHealthStatus = $"Ports geladen: L {LeftRoutePorts.Count} / R {RightRoutePorts.Count}";
         }
         catch (Exception ex)
         {
-            ServiceHealthStatus = $"Port-Service nicht verfügbar";
+            ServiceHealthStatus = "Port-Service nicht verfugbar";
             ValidationMessage = $"Port-Refresh fehlgeschlagen: {ex.Message}";
         }
     }
@@ -136,6 +150,17 @@ public partial class RoutingViewModel : ObservableObject
             _createdPortPriority[created.Id] = ++_createdPortCounter;
             RefreshPorts();
             SelectedPort = Ports.FirstOrDefault(port => string.Equals(port.Id, created.Id, StringComparison.OrdinalIgnoreCase));
+            if (created.SupportsInput)
+            {
+                SelectedSourceEndpointId = created.Id;
+            }
+
+            if (created.SupportsOutput)
+            {
+                SelectedTargetEndpointId = created.Id;
+            }
+
+            SelectRoutePort(created.Id);
             EditPortFocusRequested?.Invoke(this, EventArgs.Empty);
             ValidationMessage = $"Port '{created.Name}' erstellt.";
         }
@@ -164,6 +189,7 @@ public partial class RoutingViewModel : ObservableObject
             }
 
             RefreshPorts();
+            RefreshRoutes();
             ValidationMessage = "Port wurde umbenannt.";
         }
         catch (Exception ex)
@@ -186,7 +212,7 @@ public partial class RoutingViewModel : ObservableObject
             var removed = await _endpointCatalog.DeleteLoopbackEndpointAsync(SelectedPort.Id);
             if (!removed)
             {
-                ValidationMessage = "Port konnte nicht gelöscht werden.";
+                ValidationMessage = "Port konnte nicht geloscht werden.";
                 return;
             }
 
@@ -204,30 +230,46 @@ public partial class RoutingViewModel : ObservableObject
             }
 
             RefreshPorts();
-            ValidationMessage = "Port wurde gelöscht.";
+            RefreshRoutes();
+            ValidationMessage = "Port wurde geloscht.";
         }
         catch (Exception ex)
         {
-            ValidationMessage = $"Port löschen fehlgeschlagen: {ex.Message}";
+            ValidationMessage = $"Port loschen fehlgeschlagen: {ex.Message}";
         }
     }
 
     [RelayCommand(CanExecute = nameof(CanSaveRoute))]
     private void SaveRoute()
     {
+        if (string.IsNullOrWhiteSpace(SelectedSourceEndpointId) || string.IsNullOrWhiteSpace(SelectedTargetEndpointId))
+        {
+            ValidationMessage = "Quelle und Ziel mussen ausgewahlt sein.";
+            return;
+        }
+
         try
         {
             ValidationMessage = string.Empty;
+            var routeId = SelectedRouteId ?? Guid.NewGuid();
+
+            if (!ValidateRouteEndpoints(SelectedSourceEndpointId, SelectedTargetEndpointId, routeId, out var validationError))
+            {
+                ValidationMessage = validationError;
+                return;
+            }
 
             var route = new RouteDefinition(
-                SelectedRouteId ?? Guid.NewGuid(),
-                SelectedSourceEndpointId!,
-                SelectedTargetEndpointId!,
+                routeId,
+                SelectedSourceEndpointId,
+                SelectedTargetEndpointId,
                 RouteEnabled,
                 new RouteFilter(ParseChannels(RouteChannelsText), ParseMessageTypes(RouteTypesText)));
 
             _routeMatrix.AddOrUpdateRoute(route);
             SelectedRouteId = route.Id;
+            SelectedRouteSummary = BuildRouteSummary(route.SourceEndpointId, route.TargetEndpointId, route.Enabled);
+            ValidationMessage = "Route gespeichert.";
         }
         catch (Exception ex)
         {
@@ -243,8 +285,25 @@ public partial class RoutingViewModel : ObservableObject
             return;
         }
 
-        _routeMatrix.RemoveRoute(SelectedRouteId.Value);
-        NewRoute();
+        var removed = _routeMatrix.RemoveRoute(SelectedRouteId.Value);
+        if (!removed)
+        {
+            ValidationMessage = "Route konnte nicht entfernt werden.";
+            return;
+        }
+
+        var nextRoute = _routeMatrix.GetRoutes().FirstOrDefault();
+        if (nextRoute is null)
+        {
+            NewRoute();
+        }
+        else
+        {
+            SelectedRouteId = nextRoute.Id;
+            SelectRoute(nextRoute.Id);
+        }
+
+        ValidationMessage = "Route entfernt.";
     }
 
     [RelayCommand]
@@ -254,16 +313,17 @@ public partial class RoutingViewModel : ObservableObject
         RouteEnabled = true;
         RouteChannelsText = "alle";
         RouteTypesText = "alle";
+        SelectedRouteSummary = "Neue Route: ziehe einen Connector oder wahle Quelle/Ziel.";
 
-        if (SourceEndpoints.Count > 0)
+        if (LeftRoutePorts.Count > 0)
         {
-            SelectedSourceEndpointId = SourceEndpoints[0].Id;
+            SelectedSourceEndpointId = LeftRoutePorts[0].Id;
         }
 
-        if (TargetEndpoints.Count > 0)
+        if (RightRoutePorts.Count > 0)
         {
-            var preferred = TargetEndpoints.FirstOrDefault(endpoint =>
-                !string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase)) ?? TargetEndpoints[0];
+            var preferred = RightRoutePorts.FirstOrDefault(endpoint =>
+                !string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase)) ?? RightRoutePorts[0];
             SelectedTargetEndpointId = preferred.Id;
         }
 
@@ -286,9 +346,124 @@ public partial class RoutingViewModel : ObservableObject
         RouteEnabled = route.Enabled;
         RouteChannelsText = route.Filter.Channels.Count == 0 ? "alle" : string.Join(", ", route.Filter.Channels.OrderBy(channel => channel));
         RouteTypesText = route.Filter.MessageTypes.Count == 0 ? "alle" : string.Join(", ", route.Filter.MessageTypes.OrderBy(type => type.ToString()));
+        SelectedRouteSummary = BuildRouteSummary(route.SourceEndpointId, route.TargetEndpointId, route.Enabled);
+
+        SelectRoutePort(route.SourceEndpointId);
 
         SaveRouteCommand.NotifyCanExecuteChanged();
         DeleteRouteCommand.NotifyCanExecuteChanged();
+    }
+
+    public void SelectRouteFromCanvas(Guid routeId)
+    {
+        SelectRoute(routeId);
+    }
+
+    public bool DeleteSelectedRouteFromCanvas()
+    {
+        if (!CanDeleteRoute())
+        {
+            return false;
+        }
+
+        DeleteRoute();
+        return true;
+    }
+
+    public bool TryDeleteRouteForPort(string endpointId)
+    {
+        if (string.IsNullOrWhiteSpace(endpointId))
+        {
+            ValidationMessage = "Kein Port ausgewahlt.";
+            return false;
+        }
+
+        if (SelectedRouteId.HasValue)
+        {
+            var selectedRoute = _routeMatrix.GetRoutes().FirstOrDefault(route => route.Id == SelectedRouteId.Value);
+            if (selectedRoute is not null &&
+                (string.Equals(selectedRoute.SourceEndpointId, endpointId, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(selectedRoute.TargetEndpointId, endpointId, StringComparison.OrdinalIgnoreCase)))
+            {
+                DeleteRoute();
+                return true;
+            }
+        }
+
+        var matchingRoutes = _routeMatrix.GetRoutes()
+            .Where(route =>
+                string.Equals(route.SourceEndpointId, endpointId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(route.TargetEndpointId, endpointId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matchingRoutes.Count == 0)
+        {
+            ValidationMessage = "Keine Verbindung fur diesen Port gefunden.";
+            return false;
+        }
+
+        if (matchingRoutes.Count > 1)
+        {
+            var suggested = matchingRoutes.FirstOrDefault(route => route.Enabled) ?? matchingRoutes[0];
+            SelectRoute(suggested.Id);
+            ValidationMessage = "Mehrere Verbindungen vorhanden. Bitte zuerst die gewunschte Linie anklicken und dann erneut loschen.";
+            return false;
+        }
+
+        SelectRoute(matchingRoutes[0].Id);
+        DeleteRoute();
+        return true;
+    }
+
+    public void SelectRoutePort(string endpointId)
+    {
+        if (string.IsNullOrWhiteSpace(endpointId))
+        {
+            return;
+        }
+
+        SelectedRoutePortId = endpointId;
+    }
+
+    public bool CanCreateRoute(string sourceEndpointId, string targetEndpointId, out string error)
+    {
+        return ValidateRouteEndpoints(sourceEndpointId, targetEndpointId, ignoreRouteId: null, out error);
+    }
+
+    public bool TryCreateRouteByDrag(string sourceEndpointId, string targetEndpointId)
+    {
+        if (!ValidateRouteEndpoints(sourceEndpointId, targetEndpointId, ignoreRouteId: null, out var error))
+        {
+            ValidationMessage = error;
+            return false;
+        }
+
+        var route = new RouteDefinition(
+            Guid.NewGuid(),
+            sourceEndpointId,
+            targetEndpointId,
+            enabled: true,
+            filter: RouteFilter.AllowAll);
+
+        _routeMatrix.AddOrUpdateRoute(route);
+        SelectedRouteId = route.Id;
+        SelectRoute(route.Id);
+        ValidationMessage = $"Route erstellt: {ResolveEndpointName(sourceEndpointId)} -> {ResolveEndpointName(targetEndpointId)}";
+        return true;
+    }
+
+    public IReadOnlyList<RouteRow> GetRenderableRoutes()
+    {
+        if (!ShowOnlySelectedPortRoutes || string.IsNullOrWhiteSpace(SelectedRoutePortId))
+        {
+            return Routes.ToList();
+        }
+
+        return Routes
+            .Where(route =>
+                string.Equals(route.SourceEndpointId, SelectedRoutePortId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(route.TargetEndpointId, SelectedRoutePortId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
     }
 
     partial void OnSelectedPortChanged(PortRow? value)
@@ -303,14 +478,10 @@ public partial class RoutingViewModel : ObservableObject
         RenamePortCommand.NotifyCanExecuteChanged();
     }
 
-    partial void OnSelectedSourceEndpointIdChanged(string? value)
-    {
-        SaveRouteCommand.NotifyCanExecuteChanged();
-    }
-
     partial void OnHideSystemPortsChanged(bool value)
     {
         RefreshPorts();
+        RefreshRoutes();
     }
 
     partial void OnPortSearchTextChanged(string value)
@@ -328,8 +499,25 @@ public partial class RoutingViewModel : ObservableObject
         RefreshPorts();
     }
 
+    partial void OnSelectedSourceEndpointIdChanged(string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            SyncSelectedPortFromEndpointId(value);
+            SelectRoutePort(value);
+        }
+
+        SaveRouteCommand.NotifyCanExecuteChanged();
+    }
+
     partial void OnSelectedTargetEndpointIdChanged(string? value)
     {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            SyncSelectedPortFromEndpointId(value);
+            SelectRoutePort(value);
+        }
+
         SaveRouteCommand.NotifyCanExecuteChanged();
     }
 
@@ -338,6 +526,10 @@ public partial class RoutingViewModel : ObservableObject
         if (value.HasValue)
         {
             SelectRoute(value.Value);
+        }
+        else if (!CanDeleteRoute())
+        {
+            SelectedRouteSummary = "Keine Route ausgewahlt.";
         }
 
         DeleteRouteCommand.NotifyCanExecuteChanged();
@@ -362,10 +554,9 @@ public partial class RoutingViewModel : ObservableObject
 
     private void RefreshPorts()
     {
-        var endpoints = _endpointCatalog.GetEndpoints().ToList();
+        var allEndpoints = _endpointCatalog.GetEndpoints().ToList();
 
-        // Keep priority map in sync when ports were removed.
-        var knownIds = endpoints
+        var knownIds = allEndpoints
             .Select(endpoint => endpoint.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -374,45 +565,57 @@ public partial class RoutingViewModel : ObservableObject
             _createdPortPriority.Remove(staleId);
         }
 
-        var portSnapshot = endpoints
-            .Where(ShouldIncludeInPortList)
+        var filteredEndpoints = allEndpoints
+            .Where(ShouldIncludeEndpointInUi)
             .OrderByDescending(endpoint =>
                 _createdPortPriority.TryGetValue(endpoint.Id, out var priority) ? priority : 0)
             .ThenBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var routingSnapshot = endpoints
-            .OrderBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
         var selectedPortId = SelectedPort?.Id;
 
         Ports.Clear();
-        SourceEndpoints.Clear();
-        TargetEndpoints.Clear();
+        LeftRoutePorts.Clear();
+        RightRoutePorts.Clear();
 
-        foreach (var endpoint in portSnapshot)
+        foreach (var endpoint in filteredEndpoints)
         {
-            Ports.Add(new PortRow(
+            var displayName = FormatPortDisplayName(endpoint);
+            var direction = GetDirection(endpoint);
+            var owner = endpoint.IsUserManaged ? PortOwnerApp : PortOwnerSystem;
+            var status = endpoint.IsOnline ? "Online" : "Offline";
+
+            var port = new PortRow(
                 endpoint.Id,
-                FormatPortDisplayName(endpoint),
+                displayName,
                 endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System",
-                GetDirection(endpoint),
-                endpoint.IsOnline ? "Online" : "Offline",
-                endpoint.IsUserManaged ? "App" : "System",
-                endpoint.IsUserManaged));
-        }
+                direction,
+                status,
+                owner,
+                endpoint.IsUserManaged);
 
-        foreach (var endpoint in routingSnapshot)
-        {
+            Ports.Add(port);
+
             if (endpoint.SupportsInput)
             {
-                SourceEndpoints.Add(endpoint);
+                LeftRoutePorts.Add(new RouteEndpointRow(
+                    endpoint.Id,
+                    displayName,
+                    direction,
+                    owner,
+                    status,
+                    BuildEndpointMeta(endpoint)));
             }
 
             if (endpoint.SupportsOutput)
             {
-                TargetEndpoints.Add(endpoint);
+                RightRoutePorts.Add(new RouteEndpointRow(
+                    endpoint.Id,
+                    displayName,
+                    direction,
+                    owner,
+                    status,
+                    BuildEndpointMeta(endpoint)));
             }
         }
 
@@ -421,22 +624,29 @@ public partial class RoutingViewModel : ObservableObject
             : Ports.FirstOrDefault(port => string.Equals(port.Id, selectedPortId, StringComparison.OrdinalIgnoreCase))
               ?? Ports.FirstOrDefault();
 
-        if (SelectedSourceEndpointId is null || SourceEndpoints.All(endpoint => endpoint.Id != SelectedSourceEndpointId))
+        if (SelectedSourceEndpointId is null || LeftRoutePorts.All(endpoint => endpoint.Id != SelectedSourceEndpointId))
         {
-            SelectedSourceEndpointId = SourceEndpoints.FirstOrDefault()?.Id;
+            SelectedSourceEndpointId = LeftRoutePorts.FirstOrDefault()?.Id;
         }
 
-        if (SelectedTargetEndpointId is null || TargetEndpoints.All(endpoint => endpoint.Id != SelectedTargetEndpointId))
+        if (SelectedTargetEndpointId is null || RightRoutePorts.All(endpoint => endpoint.Id != SelectedTargetEndpointId))
         {
-            var preferred = TargetEndpoints.FirstOrDefault(endpoint =>
+            var preferred = RightRoutePorts.FirstOrDefault(endpoint =>
                 !string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase));
-            SelectedTargetEndpointId = preferred?.Id ?? TargetEndpoints.FirstOrDefault()?.Id;
+            SelectedTargetEndpointId = preferred?.Id ?? RightRoutePorts.FirstOrDefault()?.Id;
+        }
+
+        if (SelectedRoutePortId is null ||
+            (LeftRoutePorts.All(endpoint => endpoint.Id != SelectedRoutePortId) &&
+             RightRoutePorts.All(endpoint => endpoint.Id != SelectedRoutePortId)))
+        {
+            SelectedRoutePortId = SelectedSourceEndpointId ?? SelectedTargetEndpointId;
         }
 
         SaveRouteCommand.NotifyCanExecuteChanged();
     }
 
-    private bool ShouldIncludeInPortList(MidiEndpointDescriptor endpoint)
+    private bool ShouldIncludeEndpointInUi(MidiEndpointDescriptor endpoint)
     {
         if (HideSystemPorts && !endpoint.IsUserManaged)
         {
@@ -510,10 +720,20 @@ public partial class RoutingViewModel : ObservableObject
 
         foreach (var route in _routeMatrix.GetRoutes())
         {
+            var sourceName = endpointLookup.TryGetValue(route.SourceEndpointId, out var resolvedSourceName)
+                ? resolvedSourceName
+                : route.SourceEndpointId;
+
+            var targetName = endpointLookup.TryGetValue(route.TargetEndpointId, out var resolvedTargetName)
+                ? resolvedTargetName
+                : route.TargetEndpointId;
+
             Routes.Add(new RouteRow(
                 route.Id,
-                endpointLookup.TryGetValue(route.SourceEndpointId, out var sourceName) ? sourceName : route.SourceEndpointId,
-                endpointLookup.TryGetValue(route.TargetEndpointId, out var targetName) ? targetName : route.TargetEndpointId,
+                route.SourceEndpointId,
+                sourceName,
+                route.TargetEndpointId,
+                targetName,
                 route.Enabled,
                 route.Filter.Channels.Count == 0 ? "alle" : string.Join(", ", route.Filter.Channels.OrderBy(channel => channel)),
                 route.Filter.MessageTypes.Count == 0 ? "alle" : string.Join(", ", route.Filter.MessageTypes.OrderBy(type => type.ToString()))));
@@ -523,15 +743,102 @@ public partial class RoutingViewModel : ObservableObject
         {
             SelectRoute(selectedRouteId.Value);
         }
+        else if (Routes.Count == 0)
+        {
+            SelectedRouteId = null;
+            SelectedRouteSummary = "Keine Route ausgewahlt.";
+        }
+
+        DeleteRouteCommand.NotifyCanExecuteChanged();
+    }
+
+    private bool ValidateRouteEndpoints(string sourceEndpointId, string targetEndpointId, Guid? ignoreRouteId, out string error)
+    {
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(sourceEndpointId) || string.IsNullOrWhiteSpace(targetEndpointId))
+        {
+            error = "Quelle und Ziel mussen gesetzt sein.";
+            return false;
+        }
+
+        if (string.Equals(sourceEndpointId, targetEndpointId, StringComparison.OrdinalIgnoreCase))
+        {
+            error = "Quelle und Ziel durfen nicht identisch sein.";
+            return false;
+        }
+
+        var endpoints = _endpointCatalog.GetEndpoints();
+        var source = endpoints.FirstOrDefault(endpoint => string.Equals(endpoint.Id, sourceEndpointId, StringComparison.OrdinalIgnoreCase));
+        var target = endpoints.FirstOrDefault(endpoint => string.Equals(endpoint.Id, targetEndpointId, StringComparison.OrdinalIgnoreCase));
+
+        if (source is null || !source.SupportsInput)
+        {
+            error = "Die gewahlte Quelle unterstutzt keinen Input.";
+            return false;
+        }
+
+        if (target is null || !target.SupportsOutput)
+        {
+            error = "Das gewahlte Ziel unterstutzt keinen Output.";
+            return false;
+        }
+
+        var duplicate = _routeMatrix
+            .GetRoutes()
+            .FirstOrDefault(route =>
+                route.Id != ignoreRouteId &&
+                string.Equals(route.SourceEndpointId, sourceEndpointId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(route.TargetEndpointId, targetEndpointId, StringComparison.OrdinalIgnoreCase));
+
+        if (duplicate is not null)
+        {
+            SelectedRouteId = duplicate.Id;
+            error = "Die Route existiert bereits.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private void SyncSelectedPortFromEndpointId(string endpointId)
+    {
+        var selected = Ports.FirstOrDefault(port => string.Equals(port.Id, endpointId, StringComparison.OrdinalIgnoreCase));
+        if (selected is not null)
+        {
+            SelectedPort = selected;
+        }
+    }
+
+    private string BuildRouteSummary(string sourceEndpointId, string targetEndpointId, bool enabled)
+    {
+        var sourceName = ResolveEndpointName(sourceEndpointId);
+        var targetName = ResolveEndpointName(targetEndpointId);
+        var status = enabled ? "Aktiv" : "Inaktiv";
+        return $"{sourceName} -> {targetName} ({status})";
+    }
+
+    private string ResolveEndpointName(string endpointId)
+    {
+        return _endpointCatalog.GetEndpoints()
+            .FirstOrDefault(endpoint => string.Equals(endpoint.Id, endpointId, StringComparison.OrdinalIgnoreCase))
+            ?.Name ?? endpointId;
+    }
+
+    private static string BuildEndpointMeta(MidiEndpointDescriptor endpoint)
+    {
+        var type = endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System";
+        var status = endpoint.IsOnline ? "Online" : "Offline";
+        return $"{type} | {status}";
     }
 
     private static string GetDirection(MidiEndpointDescriptor endpoint)
     {
         return endpoint switch
         {
-            { SupportsInput: true, SupportsOutput: true } => "In/Out",
-            { SupportsInput: true } => "Input",
-            { SupportsOutput: true } => "Output",
+            { SupportsInput: true, SupportsOutput: true } => PortDirectionInOut,
+            { SupportsInput: true } => PortDirectionInput,
+            { SupportsOutput: true } => PortDirectionOutput,
             _ => "-"
         };
     }
@@ -560,7 +867,7 @@ public partial class RoutingViewModel : ObservableObject
         {
             if (!int.TryParse(token, out var channel) || channel is < 1 or > 16)
             {
-                throw new FormatException("Kanaele muessen 1 bis 16 sein.");
+                throw new FormatException("Kanaele mussen zwischen 1 und 16 liegen.");
             }
 
             channels.Add(channel);
@@ -632,9 +939,19 @@ public partial class RoutingViewModel : ObservableObject
         string Owner,
         bool IsUserManaged);
 
+    public sealed record RouteEndpointRow(
+        string Id,
+        string Name,
+        string Direction,
+        string Owner,
+        string Status,
+        string Meta);
+
     public sealed record RouteRow(
         Guid Id,
+        string SourceEndpointId,
         string SourceName,
+        string TargetEndpointId,
         string TargetName,
         bool Enabled,
         string Channels,
