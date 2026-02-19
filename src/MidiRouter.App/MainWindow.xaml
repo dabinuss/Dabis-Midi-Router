@@ -32,9 +32,24 @@
                             Command="{Binding ReloadConfigCommand}"
                             Padding="12,6"
                             Margin="0,0,8,0" />
-                    <Button Content="Speichern"
-                            Command="{Binding SaveConfigCommand}"
-                            Padding="12,6" />
+                    <Border Padding="10,6"
+                            BorderBrush="#335F7A"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Background="#132032">
+                        <TextBlock Text="{Binding SaveStateText}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#A7D8A8" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasUnsavedChanges}" Value="True">
+                                            <Setter Property="Foreground" Value="#FFD07A" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Border>
                 </StackPanel>
             </Grid>
         </Border>

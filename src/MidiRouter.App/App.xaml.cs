@@ -76,6 +76,12 @@ public partial class App : Application
         {
             if (_host is not null)
             {
+                var mainViewModel = _host.Services.GetService<MainViewModel>();
+                if (mainViewModel is not null)
+                {
+                    await mainViewModel.FlushPendingSaveAsync();
+                }
+
                 await _host.StopAsync(TimeSpan.FromSeconds(3));
                 _host.Dispose();
             }

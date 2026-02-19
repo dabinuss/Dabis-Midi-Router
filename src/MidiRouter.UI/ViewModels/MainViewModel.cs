@@ -4,7 +4,9 @@ using MidiRouter.Core.Config;
 using MidiRouter.Core.Engine;
 using MidiRouter.Core.Monitoring;
 using MidiRouter.Core.Routing;
+using System.ComponentModel;
 using System.Windows;
+using System.Windows.Threading;
 
 namespace MidiRouter.UI.ViewModels;
 
@@ -14,12 +16,23 @@ public partial class MainViewModel : ObservableObject
     private readonly RouteMatrix _routeMatrix;
     private readonly IMidiSession _midiSession;
     private readonly IMidiMessageLog _messageLog;
+    private readonly DispatcherTimer _autoSaveTimer;
+    private bool _suppressAutoSave;
+    private bool _hasPendingChanges;
+    private bool _isSaving;
+    private bool _saveRequestedWhileSaving;
 
     [ObservableProperty]
     private string _statusText = "Bereit";
 
     [ObservableProperty]
     private string _activeProfileName = "Default";
+
+    [ObservableProperty]
+    private string _saveStateText = "Gespeichert";
+
+    [ObservableProperty]
+    private bool _hasUnsavedChanges;
 
     public MainViewModel(
         RoutingViewModel routing,
@@ -39,6 +52,14 @@ public partial class MainViewModel : ObservableObject
         _messageLog = messageLog;
 
         _midiSession.StateChanged += OnMidiSessionStateChanged;
+        _routeMatrix.RoutesChanged += OnRoutesChanged;
+        Settings.PropertyChanged += OnSettingsPropertyChanged;
+
+        _autoSaveTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(350)
+        };
+        _autoSaveTimer.Tick += OnAutoSaveTimerTick;
     }
 
     public RoutingViewModel Routing { get; }
@@ -64,6 +85,137 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task SaveConfig()
     {
+        _autoSaveTimer.Stop();
+        _hasPendingChanges = true;
+        HasUnsavedChanges = true;
+        SaveStateText = "Aenderungen ausstehend";
+        await SaveConfigCoreAsync().ConfigureAwait(false);
+    }
+
+    [RelayCommand]
+    private async Task ReloadConfig()
+    {
+        _autoSaveTimer.Stop();
+        _suppressAutoSave = true;
+
+        try
+        {
+            var config = await _configStore.LoadAsync().ConfigureAwait(false);
+
+            RunOnUiThread(() =>
+            {
+                ActiveProfileName = config.ActiveProfileName;
+                Settings.LogBufferSize = config.LogBufferSize;
+                Settings.StartMinimized = config.StartMinimized;
+                _messageLog.ConfigureCapacity(Settings.LogBufferSize);
+
+                var profile = config.Profiles.FirstOrDefault(x => x.Name == config.ActiveProfileName)
+                    ?? config.Profiles.FirstOrDefault()
+                    ?? new RoutingProfile();
+
+                var routes = profile.Routes
+                    .Where(route => !string.IsNullOrWhiteSpace(route.SourceEndpointId) && !string.IsNullOrWhiteSpace(route.TargetEndpointId))
+                    .Select(route =>
+                        new RouteDefinition(
+                            route.Id,
+                            route.SourceEndpointId,
+                            route.TargetEndpointId,
+                            route.Enabled,
+                            new RouteFilter(route.Channels, route.MessageTypes)));
+
+                _routeMatrix.ReplaceRoutes(routes);
+                _hasPendingChanges = false;
+                HasUnsavedChanges = false;
+                SaveStateText = $"Gespeichert ({DateTime.Now:T})";
+                StatusText = $"Konfiguration geladen ({DateTime.Now:T}) | Session: {GetStateText(_midiSession.State)}";
+            });
+        }
+        finally
+        {
+            _suppressAutoSave = false;
+        }
+    }
+
+    public async Task FlushPendingSaveAsync()
+    {
+        _autoSaveTimer.Stop();
+
+        if (_isSaving)
+        {
+            _saveRequestedWhileSaving = true;
+            while (_isSaving)
+            {
+                await Task.Delay(25).ConfigureAwait(false);
+            }
+        }
+
+        if (_hasPendingChanges || _saveRequestedWhileSaving)
+        {
+            await SaveConfigCoreAsync().ConfigureAwait(false);
+        }
+    }
+
+    partial void OnActiveProfileNameChanged(string value)
+    {
+        MarkDirty();
+    }
+
+    private void OnRoutesChanged(object? sender, EventArgs e)
+    {
+        RunOnUiThread(MarkDirty);
+    }
+
+    private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(SettingsViewModel.LogBufferSize))
+        {
+            _messageLog.ConfigureCapacity(Settings.LogBufferSize);
+        }
+
+        if (e.PropertyName is nameof(SettingsViewModel.LogBufferSize) or nameof(SettingsViewModel.StartMinimized))
+        {
+            RunOnUiThread(MarkDirty);
+        }
+    }
+
+    private async void OnAutoSaveTimerTick(object? sender, EventArgs e)
+    {
+        _autoSaveTimer.Stop();
+        await SaveConfigCoreAsync().ConfigureAwait(false);
+    }
+
+    private void MarkDirty()
+    {
+        if (_suppressAutoSave)
+        {
+            return;
+        }
+
+        _hasPendingChanges = true;
+        HasUnsavedChanges = true;
+        SaveStateText = "Aenderungen ausstehend";
+        _autoSaveTimer.Stop();
+        _autoSaveTimer.Start();
+    }
+
+    private async Task SaveConfigCoreAsync()
+    {
+        if (_suppressAutoSave || !_hasPendingChanges)
+        {
+            return;
+        }
+
+        if (_isSaving)
+        {
+            _saveRequestedWhileSaving = true;
+            return;
+        }
+
+        _isSaving = true;
+        _saveRequestedWhileSaving = false;
+
+        RunOnUiThread(() => SaveStateText = "Speichert...");
+
         var routeConfigs = _routeMatrix
             .GetRoutes()
             .Select(route => new RouteConfig
@@ -92,36 +244,36 @@ public partial class MainViewModel : ObservableObject
             ]
         };
 
-        await _configStore.SaveAsync(config);
-        StatusText = $"Konfiguration gespeichert ({DateTime.Now:T}) | Session: {GetStateText(_midiSession.State)}";
-    }
+        try
+        {
+            await _configStore.SaveAsync(config).ConfigureAwait(false);
+            RunOnUiThread(() =>
+            {
+                _hasPendingChanges = false;
+                HasUnsavedChanges = false;
+                SaveStateText = $"Gespeichert ({DateTime.Now:T})";
+            });
+        }
+        catch (Exception ex)
+        {
+            RunOnUiThread(() =>
+            {
+                _hasPendingChanges = true;
+                HasUnsavedChanges = true;
+                SaveStateText = "Aenderungen ausstehend (Speicherfehler)";
+                StatusText = $"Speichern fehlgeschlagen: {ex.Message}";
+            });
+        }
+        finally
+        {
+            _isSaving = false;
+        }
 
-    [RelayCommand]
-    private async Task ReloadConfig()
-    {
-        var config = await _configStore.LoadAsync();
-
-        ActiveProfileName = config.ActiveProfileName;
-        Settings.LogBufferSize = config.LogBufferSize;
-        Settings.StartMinimized = config.StartMinimized;
-        _messageLog.ConfigureCapacity(Settings.LogBufferSize);
-
-        var profile = config.Profiles.FirstOrDefault(x => x.Name == config.ActiveProfileName)
-            ?? config.Profiles.FirstOrDefault()
-            ?? new RoutingProfile();
-
-        var routes = profile.Routes
-            .Where(route => !string.IsNullOrWhiteSpace(route.SourceEndpointId) && !string.IsNullOrWhiteSpace(route.TargetEndpointId))
-            .Select(route =>
-                new RouteDefinition(
-                    route.Id,
-                    route.SourceEndpointId,
-                    route.TargetEndpointId,
-                    route.Enabled,
-                    new RouteFilter(route.Channels, route.MessageTypes)));
-
-        _routeMatrix.ReplaceRoutes(routes);
-        StatusText = $"Konfiguration geladen ({DateTime.Now:T}) | Session: {GetStateText(_midiSession.State)}";
+        if (_saveRequestedWhileSaving)
+        {
+            _saveRequestedWhileSaving = false;
+            MarkDirty();
+        }
     }
 
     private void OnMidiSessionStateChanged(object? sender, MidiSessionStateChangedEventArgs args)
