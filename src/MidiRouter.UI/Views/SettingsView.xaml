@@ -10,6 +10,14 @@
         <CheckBox Content="Minimiert starten"
                   IsChecked="{Binding StartMinimized, Mode=TwoWay}" />
 
+        <CheckBox Content="Im Hintergrund weiterlaufen (Tray-Host)"
+                  Margin="0,10,0,0"
+                  IsChecked="{Binding RunInBackground, Mode=TwoWay}" />
+
+        <CheckBox Content="Host beim Windows-Login automatisch starten"
+                  Margin="0,6,0,0"
+                  IsChecked="{Binding AutoStartHost, Mode=TwoWay}" />
+
         <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
             <TextBlock VerticalAlignment="Center" Text="Log-Puffer (Eintraege):" Margin="0,0,8,0" />
             <TextBox Width="120" Text="{Binding LogBufferSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />

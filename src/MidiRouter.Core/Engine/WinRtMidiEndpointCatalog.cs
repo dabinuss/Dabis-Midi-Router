@@ -1,8 +1,12 @@
 #if WINDOWS
+using System.Collections.ObjectModel;
 using System.Text.Json;
+using Microsoft.Windows.Devices.Midi2;
+using Microsoft.Windows.Devices.Midi2.Endpoints.Loopback;
+using Microsoft.Windows.Devices.Midi2.Initialization;
+using Microsoft.Windows.Devices.Midi2.ServiceConfig;
 using MidiRouter.Core.Config;
 using NAudio.Midi;
-using System.Collections.ObjectModel;
 using Windows.Devices.Enumeration;
 using Windows.Devices.Midi;
 
@@ -19,8 +23,16 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     private readonly object _syncRoot = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly Dictionary<string, HardwareEndpointState> _hardwareEndpoints = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, MidiEndpointDescriptor> _loopbackEndpoints = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<Guid, ManagedLoopbackEndpointState> _managedLoopbacks = new();
+    private readonly Dictionary<string, Guid> _managedPortAssociationByEndpointId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Guid> _managedUmpAssociationByEndpointId = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _loopbackStorePath;
+
+    private MidiDesktopAppSdkInitializer? _midiInitializer;
+    private volatile bool _midiServicesEnabled;
+    private string _midiServicesStatus = "Windows MIDI Services Runtime nicht initialisiert.";
+    private Task? _midiServicesInitializationTask;
+    private int _midiServicesInitializationState;
 
     private DeviceWatcher? _inputWatcher;
     private DeviceWatcher? _outputWatcher;
@@ -37,7 +49,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         }
 
         _loopbackStorePath = Path.Combine(configDirectory, "loopback-endpoints.json");
-        LoadPersistedLoopbackEndpoints();
+
+        LoadPersistedLoopbackDefinitions();
+        EnsureMidiServicesInitializationStarted();
     }
 
     public event EventHandler? EndpointsChanged;
@@ -47,15 +61,18 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         lock (_syncRoot)
         {
             var endpoints = _hardwareEndpoints
-                .Select(pair => new MidiEndpointDescriptor(
-                    pair.Key,
-                    pair.Value.Name,
-                    MidiEndpointKind.Hardware,
-                    pair.Value.SupportsInput,
-                    pair.Value.SupportsOutput,
-                    pair.Value.IsOnline,
-                    IsUserManaged: false))
-                .Concat(_loopbackEndpoints.Values)
+                .Select(pair =>
+                {
+                    var isManaged = _managedPortAssociationByEndpointId.ContainsKey(pair.Key);
+                    return new MidiEndpointDescriptor(
+                        pair.Key,
+                        pair.Value.Name,
+                        isManaged ? MidiEndpointKind.Loopback : MidiEndpointKind.Hardware,
+                        pair.Value.SupportsInput,
+                        pair.Value.SupportsOutput,
+                        pair.Value.IsOnline,
+                        IsUserManaged: isManaged);
+                })
                 .OrderBy(endpoint => endpoint.Kind)
                 .ThenBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -67,10 +84,17 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     public async Task RefreshAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        EnsureMidiServicesInitializationStarted();
 
         await _refreshLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (_midiServicesEnabled)
+            {
+                await EnsureManagedLoopbacksMaterializedAsync(cancellationToken).ConfigureAwait(false);
+                await RefreshManagedLoopbackPortMappingsAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             var inputDevices = await DeviceInformation.FindAllAsync(MidiInPort.GetDeviceSelector());
             var outputDevices = await DeviceInformation.FindAllAsync(MidiOutPort.GetDeviceSelector());
 
@@ -106,6 +130,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                 {
                     _hardwareEndpoints[pair.Key] = pair.Value;
                 }
+
+                RebuildManagedAssociationMapUnsafe(snapshot);
             }
         }
         finally
@@ -113,151 +139,153 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             _refreshLock.Release();
         }
 
-        // Start watchers after a full snapshot is available.
-        // This avoids early partial updates during startup that can make
-        // some endpoints appear a few seconds later in the UI.
         EnsureWatchersStarted();
         EndpointsChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    public Task<MidiEndpointDescriptor> CreateLoopbackEndpointAsync(string name, CancellationToken cancellationToken = default)
+    public async Task<MidiEndpointDescriptor> CreateLoopbackEndpointAsync(string name, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var endpoint = CreateLoopbackDescriptor(
-            $"loop:{Guid.NewGuid():N}",
-            string.IsNullOrWhiteSpace(name) ? $"Loopback {DateTime.Now:HHmmss}" : name.Trim());
+        await EnsureMidiServicesReadyAsync(cancellationToken).ConfigureAwait(false);
 
-        List<PersistedLoopbackEndpoint> persistedSnapshot;
+        var baseName = NormalizeLoopbackBaseName(name);
+        var loopback = new ManagedLoopbackEndpointState(
+            associationId: Guid.NewGuid(),
+            baseName: baseName,
+            uniqueIdA: BuildUniqueId("A"),
+            uniqueIdB: BuildUniqueId("B"));
+
+        await CreateRuntimeLoopbackPairAsync(loopback, cancellationToken).ConfigureAwait(false);
+        await ResolveManagedPortIdsWithRetryAsync(loopback, cancellationToken).ConfigureAwait(false);
+
         lock (_syncRoot)
         {
-            _loopbackEndpoints[endpoint.Id] = endpoint;
-            persistedSnapshot = SnapshotLoopbackEndpointsUnsafe();
+            _managedLoopbacks[loopback.AssociationId] = loopback;
+            RegisterLoopbackMappingsUnsafe(loopback);
         }
 
-        try
+        PersistLoopbackDefinitions();
+        await RefreshAsync(cancellationToken).ConfigureAwait(false);
+
+        var createdDescriptor = FindDescriptorForLoopback(loopback.AssociationId);
+        if (createdDescriptor is not null)
         {
-            PersistLoopbackEndpoints(persistedSnapshot);
-        }
-        catch
-        {
-            lock (_syncRoot)
-            {
-                _loopbackEndpoints.Remove(endpoint.Id);
-            }
-
-            throw;
+            return createdDescriptor;
         }
 
-        EndpointsChanged?.Invoke(this, EventArgs.Empty);
-        return Task.FromResult(endpoint);
+        return new MidiEndpointDescriptor(
+            loopback.EndpointDeviceIdA,
+            BuildEndpointName(baseName, 'A'),
+            MidiEndpointKind.Loopback,
+            SupportsInput: true,
+            SupportsOutput: true,
+            IsOnline: true,
+            IsUserManaged: true);
     }
 
-    public Task<bool> DeleteLoopbackEndpointAsync(string endpointId, CancellationToken cancellationToken = default)
+    public async Task<bool> DeleteLoopbackEndpointAsync(string endpointId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         if (string.IsNullOrWhiteSpace(endpointId))
         {
-            return Task.FromResult(false);
+            return false;
         }
 
-        bool removed;
-        MidiEndpointDescriptor? removedEndpoint = null;
-        List<PersistedLoopbackEndpoint> persistedSnapshot = [];
+        await EnsureMidiServicesReadyAsync(cancellationToken).ConfigureAwait(false);
+
+        ManagedLoopbackEndpointState? loopback;
         lock (_syncRoot)
         {
-            removed = _loopbackEndpoints.Remove(endpointId, out removedEndpoint);
-            if (removed)
+            if (!TryFindLoopbackByEndpointIdUnsafe(endpointId, out loopback) || loopback is null)
             {
-                persistedSnapshot = SnapshotLoopbackEndpointsUnsafe();
+                return false;
             }
         }
 
-        if (removed)
+        if (_midiServicesEnabled)
         {
             try
             {
-                PersistLoopbackEndpoints(persistedSnapshot);
+                var removed = MidiLoopbackEndpointManager.RemoveTransientLoopbackEndpoints(
+                    new MidiLoopbackEndpointRemovalConfig(loopback.AssociationId));
+
+                if (!removed)
+                {
+                    return false;
+                }
             }
             catch
             {
-                lock (_syncRoot)
-                {
-                    if (removedEndpoint is not null)
-                    {
-                        _loopbackEndpoints[removedEndpoint.Id] = removedEndpoint;
-                    }
-                }
-
-                throw;
+                return false;
             }
-
-            EndpointsChanged?.Invoke(this, EventArgs.Empty);
         }
 
-        return Task.FromResult(removed);
+        lock (_syncRoot)
+        {
+            _managedLoopbacks.Remove(loopback.AssociationId);
+            RemoveLoopbackMappingsUnsafe(loopback.AssociationId);
+        }
+
+        PersistLoopbackDefinitions();
+        await RefreshAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
-    public Task<bool> RenameLoopbackEndpointAsync(string endpointId, string newName, CancellationToken cancellationToken = default)
+    public async Task<bool> RenameLoopbackEndpointAsync(string endpointId, string newName, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         if (string.IsNullOrWhiteSpace(endpointId) || string.IsNullOrWhiteSpace(newName))
         {
-            return Task.FromResult(false);
+            return false;
         }
 
-        bool renamed;
-        var safeName = newName.Trim();
-        MidiEndpointDescriptor? previousEndpoint = null;
-        List<PersistedLoopbackEndpoint> persistedSnapshot = [];
+        await EnsureMidiServicesReadyAsync(cancellationToken).ConfigureAwait(false);
+
+        ManagedLoopbackEndpointState? loopback;
+        lock (_syncRoot)
+        {
+            if (!TryFindLoopbackByEndpointIdUnsafe(endpointId, out loopback) || loopback is null)
+            {
+                return false;
+            }
+        }
+
+        var renamedBaseName = NormalizeLoopbackBaseName(newName);
+
+        if (_midiServicesEnabled)
+        {
+            if (!TryRenameRuntimeLoopbackEndpoint(loopback.EndpointDeviceIdA, BuildEndpointName(renamedBaseName, 'A')))
+            {
+                return false;
+            }
+
+            if (!TryRenameRuntimeLoopbackEndpoint(loopback.EndpointDeviceIdB, BuildEndpointName(renamedBaseName, 'B')))
+            {
+                return false;
+            }
+        }
 
         lock (_syncRoot)
         {
-            if (!_loopbackEndpoints.TryGetValue(endpointId, out var existing))
+            if (_managedLoopbacks.TryGetValue(loopback.AssociationId, out var current))
             {
-                return Task.FromResult(false);
+                current.BaseName = renamedBaseName;
             }
-
-            previousEndpoint = existing;
-            _loopbackEndpoints[endpointId] = existing with
-            {
-                Name = safeName
-            };
-
-            renamed = true;
-            persistedSnapshot = SnapshotLoopbackEndpointsUnsafe();
         }
 
-        if (renamed)
-        {
-            try
-            {
-                PersistLoopbackEndpoints(persistedSnapshot);
-            }
-            catch
-            {
-                lock (_syncRoot)
-                {
-                    if (previousEndpoint is not null)
-                    {
-                        _loopbackEndpoints[endpointId] = previousEndpoint;
-                    }
-                }
-
-                throw;
-            }
-
-            EndpointsChanged?.Invoke(this, EventArgs.Empty);
-        }
-
-        return Task.FromResult(renamed);
+        PersistLoopbackDefinitions();
+        await RefreshAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     public void Dispose()
     {
         StopWatchers();
+        _midiInitializer?.Dispose();
+        _midiInitializer = null;
         _refreshLock.Dispose();
     }
 
@@ -370,6 +398,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                     IsOnline = true
                 };
             }
+
+            RebuildManagedAssociationMapUnsafe(_hardwareEndpoints);
         }
 
         EndpointsChanged?.Invoke(this, EventArgs.Empty);
@@ -399,6 +429,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             {
                 _hardwareEndpoints[endpointId] = updated;
             }
+
+            RebuildManagedAssociationMapUnsafe(_hardwareEndpoints);
         }
 
         EndpointsChanged?.Invoke(this, EventArgs.Empty);
@@ -423,7 +455,414 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         return string.IsNullOrWhiteSpace(device.Name) ? device.Id : device.Name;
     }
 
-    private void LoadPersistedLoopbackEndpoints()
+    private void EnsureMidiServicesInitializationStarted()
+    {
+        if (Interlocked.CompareExchange(ref _midiServicesInitializationState, 1, comparand: 0) != 0)
+        {
+            return;
+        }
+
+        _midiServicesInitializationTask = Task.Run(() =>
+        {
+            InitializeMidiServicesRuntimeCore();
+        });
+
+        _ = _midiServicesInitializationTask.ContinueWith(_ =>
+        {
+            Interlocked.Exchange(ref _midiServicesInitializationState, 2);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RefreshAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            });
+        }, TaskScheduler.Default);
+    }
+
+    private void InitializeMidiServicesRuntimeCore()
+    {
+        try
+        {
+            _midiInitializer = MidiDesktopAppSdkInitializer.Create();
+            if (_midiInitializer is null)
+            {
+                _midiServicesEnabled = false;
+                _midiServicesStatus = "Windows MIDI Services Runtime nicht installiert. Bitte installieren: Microsoft.WindowsMIDIServicesSDK.";
+                return;
+            }
+
+            if (!_midiInitializer.InitializeSdkRuntime())
+            {
+                _midiServicesEnabled = false;
+                _midiServicesStatus = "Windows MIDI Services SDK Runtime konnte nicht initialisiert werden.";
+                return;
+            }
+
+            if (!_midiInitializer.EnsureServiceAvailable())
+            {
+                _midiServicesEnabled = false;
+                _midiServicesStatus = "Windows MIDI Service ist nicht verfugbar.";
+                return;
+            }
+
+            if (!MidiLoopbackEndpointManager.IsTransportAvailable)
+            {
+                _midiServicesEnabled = false;
+                _midiServicesStatus = "Loopback-Transport von Windows MIDI Services ist nicht verfugbar.";
+                return;
+            }
+
+            _midiServicesEnabled = true;
+            _midiServicesStatus = "Windows MIDI Services aktiv.";
+        }
+        catch (Exception ex)
+        {
+            _midiServicesEnabled = false;
+            _midiServicesStatus = $"Windows MIDI Services Initialisierung fehlgeschlagen: {ex.Message}";
+        }
+    }
+
+    private async Task EnsureManagedLoopbacksMaterializedAsync(CancellationToken cancellationToken)
+    {
+        List<ManagedLoopbackEndpointState> snapshot;
+        lock (_syncRoot)
+        {
+            snapshot = _managedLoopbacks.Values
+                .Select(loopback => loopback.Clone())
+                .ToList();
+        }
+
+        var changed = false;
+        foreach (var loopback in snapshot)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var resolvedA = FindLoopbackEndpointIdByUniqueId(loopback.UniqueIdA);
+            var resolvedB = FindLoopbackEndpointIdByUniqueId(loopback.UniqueIdB);
+
+            if (!string.IsNullOrWhiteSpace(resolvedA) && !string.IsNullOrWhiteSpace(resolvedB))
+            {
+                loopback.EndpointDeviceIdA = resolvedA;
+                loopback.EndpointDeviceIdB = resolvedB;
+            }
+            else
+            {
+                await CreateRuntimeLoopbackPairAsync(loopback, cancellationToken).ConfigureAwait(false);
+            }
+
+            lock (_syncRoot)
+            {
+                if (_managedLoopbacks.TryGetValue(loopback.AssociationId, out var current))
+                {
+                    current.EndpointDeviceIdA = loopback.EndpointDeviceIdA;
+                    current.EndpointDeviceIdB = loopback.EndpointDeviceIdB;
+                    _managedUmpAssociationByEndpointId[current.EndpointDeviceIdA] = current.AssociationId;
+                    _managedUmpAssociationByEndpointId[current.EndpointDeviceIdB] = current.AssociationId;
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed)
+        {
+            PersistLoopbackDefinitions();
+        }
+    }
+
+    private async Task RefreshManagedLoopbackPortMappingsAsync(CancellationToken cancellationToken)
+    {
+        List<ManagedLoopbackEndpointState> snapshot;
+        lock (_syncRoot)
+        {
+            snapshot = _managedLoopbacks.Values
+                .Select(loopback => loopback.Clone())
+                .ToList();
+        }
+
+        var updated = false;
+        foreach (var loopback in snapshot)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var resolvedPortIds = ResolveAssociatedMidi1PortDeviceIds(loopback.EndpointDeviceIdA)
+                .Union(ResolveAssociatedMidi1PortDeviceIds(loopback.EndpointDeviceIdB), StringComparer.OrdinalIgnoreCase)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (resolvedPortIds.Count == 0)
+            {
+                continue;
+            }
+
+            lock (_syncRoot)
+            {
+                if (_managedLoopbacks.TryGetValue(loopback.AssociationId, out var current) &&
+                    !current.PortDeviceIds.SetEquals(resolvedPortIds))
+                {
+                    current.PortDeviceIds = resolvedPortIds;
+                    updated = true;
+                }
+            }
+        }
+
+        if (updated)
+        {
+            PersistLoopbackDefinitions();
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private async Task CreateRuntimeLoopbackPairAsync(ManagedLoopbackEndpointState loopback, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var endpointA = new MidiLoopbackEndpointDefinition
+        {
+            Name = BuildEndpointName(loopback.BaseName, 'A'),
+            UniqueId = loopback.UniqueIdA,
+            Description = "Dabis Midi Router - virtueller Loopback-Port (A)"
+        };
+
+        var endpointB = new MidiLoopbackEndpointDefinition
+        {
+            Name = BuildEndpointName(loopback.BaseName, 'B'),
+            UniqueId = loopback.UniqueIdB,
+            Description = "Dabis Midi Router - virtueller Loopback-Port (B)"
+        };
+
+        var creationConfig = new MidiLoopbackEndpointCreationConfig(loopback.AssociationId, endpointA, endpointB);
+        var creationResult = MidiLoopbackEndpointManager.CreateTransientLoopbackEndpoints(creationConfig);
+
+        if (!creationResult.Success)
+        {
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(creationResult.ErrorInformation)
+                ? "Loopback-Endpoint konnte nicht erstellt werden."
+                : creationResult.ErrorInformation);
+        }
+
+        loopback.EndpointDeviceIdA = creationResult.EndpointDeviceIdA;
+        loopback.EndpointDeviceIdB = creationResult.EndpointDeviceIdB;
+
+        await Task.CompletedTask;
+    }
+
+    private async Task ResolveManagedPortIdsWithRetryAsync(ManagedLoopbackEndpointState loopback, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 15;
+
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var resolvedIds = ResolveAssociatedMidi1PortDeviceIds(loopback.EndpointDeviceIdA)
+                .Union(ResolveAssociatedMidi1PortDeviceIds(loopback.EndpointDeviceIdB), StringComparer.OrdinalIgnoreCase)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (resolvedIds.Count > 0)
+            {
+                loopback.PortDeviceIds = resolvedIds;
+                return;
+            }
+
+            await Task.Delay(200, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static HashSet<string> ResolveAssociatedMidi1PortDeviceIds(string endpointDeviceId)
+    {
+        var resolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrWhiteSpace(endpointDeviceId))
+        {
+            return resolved;
+        }
+
+        try
+        {
+            var endpoint = MidiEndpointDeviceInformation.CreateFromEndpointDeviceId(endpointDeviceId);
+            if (endpoint is null)
+            {
+                return resolved;
+            }
+
+            AddAssociatedPortIds(endpoint.FindAllAssociatedMidi1PortsForThisEndpoint(Midi1PortFlow.MidiMessageSource), resolved);
+            AddAssociatedPortIds(endpoint.FindAllAssociatedMidi1PortsForThisEndpoint(Midi1PortFlow.MidiMessageDestination), resolved);
+        }
+        catch
+        {
+        }
+
+        return resolved;
+    }
+
+    private static void AddAssociatedPortIds(IEnumerable<MidiEndpointAssociatedPortDeviceInformation> ports, ISet<string> target)
+    {
+        foreach (var port in ports)
+        {
+            if (!string.IsNullOrWhiteSpace(port.PortDeviceId))
+            {
+                target.Add(port.PortDeviceId);
+            }
+        }
+    }
+
+    private bool TryRenameRuntimeLoopbackEndpoint(string endpointDeviceId, string endpointName)
+    {
+        try
+        {
+            var updateConfig = new MidiServiceEndpointCustomizationConfig(MidiLoopbackEndpointManager.TransportId)
+            {
+                Name = endpointName,
+                Description = "Dabis Midi Router - virtueller Loopback-Port"
+            };
+
+            updateConfig.MatchCriteria.EndpointDeviceId = endpointDeviceId;
+            var response = MidiServiceConfig.UpdateTransportPluginConfig(updateConfig);
+            return response.Status == MidiServiceConfigResponseStatus.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task EnsureMidiServicesReadyAsync(CancellationToken cancellationToken)
+    {
+        EnsureMidiServicesInitializationStarted();
+
+        if (_midiServicesInitializationTask is not null)
+        {
+            await _midiServicesInitializationTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (_midiServicesEnabled)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(_midiServicesStatus);
+    }
+
+    private MidiEndpointDescriptor? FindDescriptorForLoopback(Guid associationId)
+    {
+        lock (_syncRoot)
+        {
+            var endpointIds = _managedPortAssociationByEndpointId
+                .Where(pair => pair.Value == associationId)
+                .Select(pair => pair.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return GetEndpoints()
+                .FirstOrDefault(endpoint => endpointIds.Contains(endpoint.Id));
+        }
+    }
+
+    private bool TryFindLoopbackByEndpointIdUnsafe(string endpointId, out ManagedLoopbackEndpointState? loopback)
+    {
+        loopback = null;
+
+        if (_managedPortAssociationByEndpointId.TryGetValue(endpointId, out var associationId) &&
+            _managedLoopbacks.TryGetValue(associationId, out loopback))
+        {
+            return true;
+        }
+
+        if (_managedUmpAssociationByEndpointId.TryGetValue(endpointId, out associationId) &&
+            _managedLoopbacks.TryGetValue(associationId, out loopback))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private void RegisterLoopbackMappingsUnsafe(ManagedLoopbackEndpointState loopback)
+    {
+        if (!string.IsNullOrWhiteSpace(loopback.EndpointDeviceIdA))
+        {
+            _managedUmpAssociationByEndpointId[loopback.EndpointDeviceIdA] = loopback.AssociationId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(loopback.EndpointDeviceIdB))
+        {
+            _managedUmpAssociationByEndpointId[loopback.EndpointDeviceIdB] = loopback.AssociationId;
+        }
+
+        foreach (var portId in loopback.PortDeviceIds)
+        {
+            _managedPortAssociationByEndpointId[portId] = loopback.AssociationId;
+        }
+    }
+
+    private void RemoveLoopbackMappingsUnsafe(Guid associationId)
+    {
+        foreach (var key in _managedPortAssociationByEndpointId
+                     .Where(pair => pair.Value == associationId)
+                     .Select(pair => pair.Key)
+                     .ToList())
+        {
+            _managedPortAssociationByEndpointId.Remove(key);
+        }
+
+        foreach (var key in _managedUmpAssociationByEndpointId
+                     .Where(pair => pair.Value == associationId)
+                     .Select(pair => pair.Key)
+                     .ToList())
+        {
+            _managedUmpAssociationByEndpointId.Remove(key);
+        }
+    }
+
+    private void RebuildManagedAssociationMapUnsafe(IReadOnlyDictionary<string, HardwareEndpointState> snapshot)
+    {
+        _managedPortAssociationByEndpointId.Clear();
+
+        foreach (var loopback in _managedLoopbacks.Values)
+        {
+            foreach (var portId in loopback.PortDeviceIds)
+            {
+                if (snapshot.ContainsKey(portId))
+                {
+                    _managedPortAssociationByEndpointId[portId] = loopback.AssociationId;
+                }
+            }
+
+            foreach (var candidate in snapshot)
+            {
+                if (_managedPortAssociationByEndpointId.ContainsKey(candidate.Key))
+                {
+                    continue;
+                }
+
+                var normalizedName = NormalizeEndpointName(candidate.Value.Name);
+                var endpointNameA = NormalizeEndpointName(BuildEndpointName(loopback.BaseName, 'A'));
+                var endpointNameB = NormalizeEndpointName(BuildEndpointName(loopback.BaseName, 'B'));
+
+                if (string.Equals(normalizedName, endpointNameA, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(normalizedName, endpointNameB, StringComparison.OrdinalIgnoreCase))
+                {
+                    _managedPortAssociationByEndpointId[candidate.Key] = loopback.AssociationId;
+                    loopback.PortDeviceIds.Add(candidate.Key);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(loopback.EndpointDeviceIdA))
+            {
+                _managedUmpAssociationByEndpointId[loopback.EndpointDeviceIdA] = loopback.AssociationId;
+            }
+
+            if (!string.IsNullOrWhiteSpace(loopback.EndpointDeviceIdB))
+            {
+                _managedUmpAssociationByEndpointId[loopback.EndpointDeviceIdB] = loopback.AssociationId;
+            }
+        }
+    }
+
+    private void LoadPersistedLoopbackDefinitions()
     {
         if (!File.Exists(_loopbackStorePath))
         {
@@ -433,38 +872,93 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         try
         {
             var raw = File.ReadAllText(_loopbackStorePath);
-            var persisted = JsonSerializer.Deserialize<List<PersistedLoopbackEndpoint>>(raw, SerializerOptions) ?? [];
+
+            var currentFormat = JsonSerializer.Deserialize<List<PersistedLoopbackEndpointDefinition>>(raw, SerializerOptions);
+            if (currentFormat is { Count: > 0 })
+            {
+                lock (_syncRoot)
+                {
+                    _managedLoopbacks.Clear();
+                    _managedPortAssociationByEndpointId.Clear();
+                    _managedUmpAssociationByEndpointId.Clear();
+
+                    foreach (var entry in currentFormat)
+                    {
+                        if (entry.AssociationId == Guid.Empty ||
+                            string.IsNullOrWhiteSpace(entry.BaseName) ||
+                            string.IsNullOrWhiteSpace(entry.UniqueIdA) ||
+                            string.IsNullOrWhiteSpace(entry.UniqueIdB))
+                        {
+                            continue;
+                        }
+
+                        _managedLoopbacks[entry.AssociationId] = new ManagedLoopbackEndpointState(
+                            entry.AssociationId,
+                            entry.BaseName,
+                            entry.UniqueIdA,
+                            entry.UniqueIdB,
+                            entry.EndpointDeviceIdA ?? string.Empty,
+                            entry.EndpointDeviceIdB ?? string.Empty,
+                            (entry.PortDeviceIds ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase));
+                    }
+                }
+
+                return;
+            }
+
+            var legacyFormat = JsonSerializer.Deserialize<List<PersistedLoopbackEndpointLegacy>>(raw, SerializerOptions);
+            if (legacyFormat is not { Count: > 0 })
+            {
+                return;
+            }
 
             lock (_syncRoot)
             {
-                _loopbackEndpoints.Clear();
-                foreach (var item in persisted)
+                _managedLoopbacks.Clear();
+                _managedPortAssociationByEndpointId.Clear();
+                _managedUmpAssociationByEndpointId.Clear();
+
+                foreach (var legacy in legacyFormat)
                 {
-                    if (string.IsNullOrWhiteSpace(item.Id) || string.IsNullOrWhiteSpace(item.Name))
+                    if (string.IsNullOrWhiteSpace(legacy.Name))
                     {
                         continue;
                     }
 
-                    _loopbackEndpoints[item.Id] = CreateLoopbackDescriptor(item.Id, item.Name);
+                    var associationId = Guid.NewGuid();
+                    _managedLoopbacks[associationId] = new ManagedLoopbackEndpointState(
+                        associationId,
+                        NormalizeLoopbackBaseName(legacy.Name),
+                        BuildUniqueId("A"),
+                        BuildUniqueId("B"));
                 }
             }
+
+            PersistLoopbackDefinitions();
         }
         catch
         {
-            // Ignore malformed persistence file and continue with runtime-only loopbacks.
         }
     }
 
-    private List<PersistedLoopbackEndpoint> SnapshotLoopbackEndpointsUnsafe()
+    private void PersistLoopbackDefinitions()
     {
-        return _loopbackEndpoints.Values
-            .OrderBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(endpoint => new PersistedLoopbackEndpoint(endpoint.Id, endpoint.Name))
-            .ToList();
-    }
+        List<PersistedLoopbackEndpointDefinition> snapshot;
+        lock (_syncRoot)
+        {
+            snapshot = _managedLoopbacks.Values
+                .OrderBy(loopback => loopback.BaseName, StringComparer.OrdinalIgnoreCase)
+                .Select(loopback => new PersistedLoopbackEndpointDefinition(
+                    loopback.AssociationId,
+                    loopback.BaseName,
+                    loopback.UniqueIdA,
+                    loopback.UniqueIdB,
+                    loopback.EndpointDeviceIdA,
+                    loopback.EndpointDeviceIdB,
+                    loopback.PortDeviceIds.OrderBy(id => id, StringComparer.OrdinalIgnoreCase).ToList()))
+                .ToList();
+        }
 
-    private void PersistLoopbackEndpoints(IReadOnlyCollection<PersistedLoopbackEndpoint> endpoints)
-    {
         var directory = Path.GetDirectoryName(_loopbackStorePath);
         if (!string.IsNullOrWhiteSpace(directory))
         {
@@ -474,7 +968,7 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         var tempPath = $"{_loopbackStorePath}.{Guid.NewGuid():N}.tmp";
         try
         {
-            var json = JsonSerializer.Serialize(endpoints, SerializerOptions);
+            var json = JsonSerializer.Serialize(snapshot, SerializerOptions);
             File.WriteAllText(tempPath, json);
             File.Move(tempPath, _loopbackStorePath, overwrite: true);
         }
@@ -487,16 +981,66 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         }
     }
 
-    private static MidiEndpointDescriptor CreateLoopbackDescriptor(string endpointId, string name)
+    private static string BuildEndpointName(string baseName, char side)
     {
-        return new MidiEndpointDescriptor(
-            endpointId,
-            name,
-            MidiEndpointKind.Loopback,
-            SupportsInput: true,
-            SupportsOutput: true,
-            IsOnline: true,
-            IsUserManaged: true);
+        return $"{baseName} ({side})";
+    }
+
+    private static string NormalizeLoopbackBaseName(string? value)
+    {
+        var candidate = string.IsNullOrWhiteSpace(value) ? $"Loopback {DateTime.Now:HHmmss}" : value.Trim();
+
+        if (candidate.EndsWith("(A)", StringComparison.OrdinalIgnoreCase) ||
+            candidate.EndsWith("(B)", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = candidate[..^3].TrimEnd();
+        }
+
+        return candidate;
+    }
+
+    private static string NormalizeEndpointName(string value)
+    {
+        if (value.StartsWith("[System]", StringComparison.OrdinalIgnoreCase))
+        {
+            return value[8..].TrimStart();
+        }
+
+        return value;
+    }
+
+    private static string BuildUniqueId(string suffix)
+    {
+        return "DMR" + Guid.NewGuid().ToString("N")[..18] + suffix;
+    }
+
+    private string? FindLoopbackEndpointIdByUniqueId(string uniqueId)
+    {
+        if (string.IsNullOrWhiteSpace(uniqueId))
+        {
+            return null;
+        }
+
+        try
+        {
+            foreach (var endpoint in MidiEndpointDeviceInformation.FindAll())
+            {
+                if (endpoint.GetTransportSuppliedInfo().TransportId != MidiLoopbackEndpointManager.TransportId)
+                {
+                    continue;
+                }
+
+                if (string.Equals(endpoint.GetTransportSuppliedInfo().SerialNumber, uniqueId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return endpoint.EndpointDeviceId;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
     }
 
     private static void AppendWinMmEndpoints(IDictionary<string, HardwareEndpointState> snapshot)
@@ -524,7 +1068,62 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         bool SupportsOutput,
         bool IsOnline);
 
-    private sealed record PersistedLoopbackEndpoint(string Id, string Name);
+    private sealed class ManagedLoopbackEndpointState
+    {
+        public ManagedLoopbackEndpointState(
+            Guid associationId,
+            string baseName,
+            string uniqueIdA,
+            string uniqueIdB,
+            string endpointDeviceIdA = "",
+            string endpointDeviceIdB = "",
+            HashSet<string>? portDeviceIds = null)
+        {
+            AssociationId = associationId;
+            BaseName = baseName;
+            UniqueIdA = uniqueIdA;
+            UniqueIdB = uniqueIdB;
+            EndpointDeviceIdA = endpointDeviceIdA;
+            EndpointDeviceIdB = endpointDeviceIdB;
+            PortDeviceIds = portDeviceIds ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        public Guid AssociationId { get; set; }
+
+        public string BaseName { get; set; }
+
+        public string UniqueIdA { get; }
+
+        public string UniqueIdB { get; }
+
+        public string EndpointDeviceIdA { get; set; }
+
+        public string EndpointDeviceIdB { get; set; }
+
+        public HashSet<string> PortDeviceIds { get; set; }
+
+        public ManagedLoopbackEndpointState Clone()
+        {
+            return new ManagedLoopbackEndpointState(
+                AssociationId,
+                BaseName,
+                UniqueIdA,
+                UniqueIdB,
+                EndpointDeviceIdA,
+                EndpointDeviceIdB,
+                PortDeviceIds.ToHashSet(StringComparer.OrdinalIgnoreCase));
+        }
+    }
+
+    private sealed record PersistedLoopbackEndpointDefinition(
+        Guid AssociationId,
+        string BaseName,
+        string UniqueIdA,
+        string UniqueIdB,
+        string? EndpointDeviceIdA,
+        string? EndpointDeviceIdB,
+        IReadOnlyList<string>? PortDeviceIds);
+
+    private sealed record PersistedLoopbackEndpointLegacy(string Id, string Name);
 }
 #endif
-

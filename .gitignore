@@ -6,6 +6,12 @@
 # dotenv files
 .env
 
+# Local tooling/test artifacts (machine-specific)
+.nuget-local/
+.tmp*/
+.tmp_*/
+NuGet.config
+
 # User-specific files
 *.rsuser
 *.suo

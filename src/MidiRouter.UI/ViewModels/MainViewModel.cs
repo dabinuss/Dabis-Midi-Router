@@ -107,6 +107,8 @@ public partial class MainViewModel : ObservableObject
                 ActiveProfileName = config.ActiveProfileName;
                 Settings.LogBufferSize = config.LogBufferSize;
                 Settings.StartMinimized = config.StartMinimized;
+                Settings.HostingMode = config.HostingMode;
+                Settings.AutoStartHost = config.AutoStartHost;
                 _messageLog.ConfigureCapacity(Settings.LogBufferSize);
 
                 var profile = config.Profiles.FirstOrDefault(x => x.Name == config.ActiveProfileName)
@@ -172,7 +174,10 @@ public partial class MainViewModel : ObservableObject
             _messageLog.ConfigureCapacity(Settings.LogBufferSize);
         }
 
-        if (e.PropertyName is nameof(SettingsViewModel.LogBufferSize) or nameof(SettingsViewModel.StartMinimized))
+        if (e.PropertyName is nameof(SettingsViewModel.LogBufferSize) or
+            nameof(SettingsViewModel.StartMinimized) or
+            nameof(SettingsViewModel.RunInBackground) or
+            nameof(SettingsViewModel.AutoStartHost))
         {
             RunOnUiThread(MarkDirty);
         }
@@ -234,6 +239,8 @@ public partial class MainViewModel : ObservableObject
             ActiveProfileName = string.IsNullOrWhiteSpace(ActiveProfileName) ? "Default" : ActiveProfileName.Trim(),
             LogBufferSize = Math.Clamp(Settings.LogBufferSize, 1, 200_000),
             StartMinimized = Settings.StartMinimized,
+            HostingMode = Settings.HostingMode,
+            AutoStartHost = Settings.AutoStartHost,
             Profiles =
             [
                 new RoutingProfile

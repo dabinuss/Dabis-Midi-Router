@@ -10,4 +10,15 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = mainViewModel;
     }
+
+    private void OnExitRequested(object sender, RoutedEventArgs e)
+    {
+        if (System.Windows.Application.Current is App app)
+        {
+            app.RequestFullExit();
+            return;
+        }
+
+        System.Windows.Application.Current?.Shutdown();
+    }
 }

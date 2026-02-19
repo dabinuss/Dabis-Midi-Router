@@ -110,18 +110,6 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointId);
         ArgumentNullException.ThrowIfNull(packet);
 
-        if (IsLoopbackEndpoint(endpointId))
-        {
-            var mirroredPacket = packet with
-            {
-                SourceEndpointId = endpointId,
-                TimestampUtc = DateTimeOffset.UtcNow
-            };
-
-            PacketReceived?.Invoke(this, new MidiPacketReceivedEventArgs(mirroredPacket));
-            return Task.CompletedTask;
-        }
-
         if (_winMmOutputs.TryGetValue(endpointId, out var winMmOut))
         {
             SendViaWinMm(winMmOut, packet.Data);
@@ -197,7 +185,9 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
         try
         {
             var endpoints = endpointCatalog.GetEndpoints()
-                .Where(endpoint => endpoint.Kind == MidiEndpointKind.Hardware && endpoint.IsOnline)
+                .Where(endpoint =>
+                    endpoint.IsOnline &&
+                    endpoint.Kind is MidiEndpointKind.Hardware or MidiEndpointKind.Loopback)
                 .ToList();
 
             var desiredInputIds = endpoints
@@ -363,15 +353,6 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
             DateTimeOffset.UtcNow);
 
         PacketReceived?.Invoke(this, new MidiPacketReceivedEventArgs(packet));
-    }
-
-    private bool IsLoopbackEndpoint(string endpointId)
-    {
-        return endpointCatalog
-            .GetEndpoints()
-            .Any(endpoint =>
-                endpoint.Kind == MidiEndpointKind.Loopback &&
-                string.Equals(endpoint.Id, endpointId, StringComparison.OrdinalIgnoreCase));
     }
 
     private void SetState(MidiSessionState state, string? detail = null)

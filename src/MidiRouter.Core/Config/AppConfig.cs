@@ -8,6 +8,10 @@ public sealed class AppConfig
 
     public bool StartMinimized { get; set; }
 
+    public HostingMode HostingMode { get; set; } = HostingMode.TrayHost;
+
+    public bool AutoStartHost { get; set; }
+
     public List<RoutingProfile> Profiles { get; set; } =
     [
         new RoutingProfile { Name = "Default" }

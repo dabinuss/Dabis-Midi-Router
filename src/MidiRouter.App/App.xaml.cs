@@ -9,10 +9,18 @@ using Serilog;
 
 namespace MidiRouter.App;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
+    private const string SingleInstanceMutexName = @"Local\DabisMidiRouter.SingleInstance";
+    private const string ActivationEventName = @"Local\DabisMidiRouter.Activate";
+
     private IHost? _host;
     private string _appDataPath = string.Empty;
+    private SingleInstanceCoordinator? _singleInstanceCoordinator;
+    private BackgroundTrayController? _trayController;
+    private MainWindow? _mainWindow;
+    private MainViewModel? _mainViewModel;
+    private bool _exitRequested;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -26,6 +34,15 @@ public partial class App : Application
 
             Directory.CreateDirectory(_appDataPath);
             Directory.CreateDirectory(Path.Combine(_appDataPath, "logs"));
+
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            _singleInstanceCoordinator = new SingleInstanceCoordinator(SingleInstanceMutexName, ActivationEventName);
+            if (!_singleInstanceCoordinator.TryAcquirePrimary(OnActivationRequested))
+            {
+                SingleInstanceCoordinator.SignalPrimaryInstance(ActivationEventName);
+                Shutdown(0);
+                return;
+            }
 
             _host = Host.CreateDefaultBuilder()
                 .UseSerilog((_, _, loggerConfiguration) =>
@@ -51,20 +68,37 @@ public partial class App : Application
 
             await _host.StartAsync();
 
-            var mainViewModel = _host.Services.GetRequiredService<MainViewModel>();
-            await mainViewModel.InitializeAsync();
+            _mainViewModel = _host.Services.GetRequiredService<MainViewModel>();
+            await _mainViewModel.InitializeAsync();
 
-            var mainWindow = _host.Services.GetRequiredService<MainWindow>();
-            mainWindow.Show();
+            _mainWindow = _host.Services.GetRequiredService<MainWindow>();
+            _mainWindow.Closing += OnMainWindowClosing;
+            _trayController = new BackgroundTrayController(_mainWindow, _mainViewModel.Settings, RequestExit);
+
+            var backgroundArg = e.Args.Any(arg => string.Equals(arg, "--background", StringComparison.OrdinalIgnoreCase));
+            var startHidden = backgroundArg || _mainViewModel.Settings.StartMinimized;
+
+            if (startHidden && _trayController.ShouldKeepRunningInBackground)
+            {
+                _trayController.HideWindowToBackground(showBalloonHint: false);
+            }
+            else
+            {
+                _mainWindow.Show();
+                if (startHidden)
+                {
+                    _mainWindow.WindowState = WindowState.Minimized;
+                }
+            }
         }
         catch (Exception ex)
         {
             Log.Fatal(ex, "Application startup failed");
-            MessageBox.Show(
+            System.Windows.MessageBox.Show(
                 $"Die Anwendung konnte nicht gestartet werden:{Environment.NewLine}{ex.Message}",
                 "Dabis Midi Router",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Error);
 
             Shutdown(-1);
         }
@@ -74,12 +108,14 @@ public partial class App : Application
     {
         try
         {
+            _trayController?.Dispose();
+            _trayController = null;
+
             if (_host is not null)
             {
-                var mainViewModel = _host.Services.GetService<MainViewModel>();
-                if (mainViewModel is not null)
+                if (_mainViewModel is not null)
                 {
-                    await mainViewModel.FlushPendingSaveAsync();
+                    await _mainViewModel.FlushPendingSaveAsync();
                 }
 
                 await _host.StopAsync(TimeSpan.FromSeconds(3));
@@ -102,9 +138,63 @@ public partial class App : Application
         }
         finally
         {
+            _singleInstanceCoordinator?.Dispose();
+            _singleInstanceCoordinator = null;
+
             Log.CloseAndFlush();
         }
 
         base.OnExit(e);
+    }
+
+    private void OnMainWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_exitRequested)
+        {
+            return;
+        }
+
+        if (_trayController is not null && _trayController.ShouldKeepRunningInBackground)
+        {
+            e.Cancel = true;
+            _trayController.HideWindowToBackground(showBalloonHint: true);
+            return;
+        }
+
+        _exitRequested = true;
+        Shutdown();
+    }
+
+    private void RequestExit()
+    {
+        _exitRequested = true;
+
+        if (_mainWindow is not null)
+        {
+            _mainWindow.Closing -= OnMainWindowClosing;
+            _mainWindow.Close();
+        }
+
+        Shutdown();
+    }
+
+    public void RequestFullExit()
+    {
+        RequestExit();
+    }
+
+    private void OnActivationRequested()
+    {
+        _ = Dispatcher.InvokeAsync(() =>
+        {
+            if (_trayController is not null)
+            {
+                _trayController.ShowWindow();
+                return;
+            }
+
+            _mainWindow?.Show();
+            _mainWindow?.Activate();
+        });
     }
 }

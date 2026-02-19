@@ -146,21 +146,55 @@ public partial class RoutingViewModel : ObservableObject
         try
         {
             ValidationMessage = string.Empty;
+            var knownManagedIds = _endpointCatalog
+                .GetEndpoints()
+                .Where(endpoint => endpoint.IsUserManaged)
+                .Select(endpoint => endpoint.Id)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             var created = await _endpointCatalog.CreateLoopbackEndpointAsync(NewPortName);
-            _createdPortPriority[created.Id] = ++_createdPortCounter;
+
+            var newlyCreatedManagedEndpoints = _endpointCatalog
+                .GetEndpoints()
+                .Where(endpoint => endpoint.IsUserManaged && !knownManagedIds.Contains(endpoint.Id))
+                .OrderBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (newlyCreatedManagedEndpoints.Count == 0)
+            {
+                _createdPortPriority[created.Id] = ++_createdPortCounter;
+            }
+            else
+            {
+                foreach (var endpoint in newlyCreatedManagedEndpoints)
+                {
+                    _createdPortPriority[endpoint.Id] = ++_createdPortCounter;
+                }
+            }
+
             RefreshPorts();
-            SelectedPort = Ports.FirstOrDefault(port => string.Equals(port.Id, created.Id, StringComparison.OrdinalIgnoreCase));
+
+            var selectedPortId = Ports.Any(port => string.Equals(port.Id, created.Id, StringComparison.OrdinalIgnoreCase))
+                ? created.Id
+                : newlyCreatedManagedEndpoints
+                    .Select(endpoint => endpoint.Id)
+                    .FirstOrDefault(id => Ports.Any(port => string.Equals(port.Id, id, StringComparison.OrdinalIgnoreCase)));
+
+            SelectedPort = selectedPortId is null
+                ? Ports.FirstOrDefault()
+                : Ports.FirstOrDefault(port => string.Equals(port.Id, selectedPortId, StringComparison.OrdinalIgnoreCase));
+
             if (created.SupportsInput)
             {
-                SelectedSourceEndpointId = created.Id;
+                SelectedSourceEndpointId = selectedPortId ?? created.Id;
             }
 
             if (created.SupportsOutput)
             {
-                SelectedTargetEndpointId = created.Id;
+                SelectedTargetEndpointId = selectedPortId ?? created.Id;
             }
 
-            SelectRoutePort(created.Id);
+            SelectRoutePort(selectedPortId ?? created.Id);
             EditPortFocusRequested?.Invoke(this, EventArgs.Empty);
             ValidationMessage = $"Interner Port '{created.Name}' erstellt.";
         }
