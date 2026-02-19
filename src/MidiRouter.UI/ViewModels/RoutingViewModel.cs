@@ -9,8 +9,45 @@ namespace MidiRouter.UI.ViewModels;
 
 public partial class RoutingViewModel : ObservableObject
 {
+    private const string PortOwnerAll = "Alle Eigentümer";
+    private const string PortOwnerSystem = "System";
+    private const string PortOwnerApp = "App";
+    private const string PortDirectionAll = "Alle Richtungen";
+    private const string PortDirectionInOut = "In/Out";
+    private const string PortDirectionInput = "Input";
+    private const string PortDirectionOutput = "Output";
+
     private readonly RouteMatrix _routeMatrix;
     private readonly IMidiEndpointCatalog _endpointCatalog;
+    private readonly Dictionary<string, long> _createdPortPriority = new(StringComparer.OrdinalIgnoreCase);
+    private long _createdPortCounter;
+
+    [ObservableProperty]
+    private string _serviceHealthStatus = "Port-Check ausstehend";
+
+    [ObservableProperty]
+    private string _validationMessage = string.Empty;
+
+    [ObservableProperty]
+    private string _newPortName = "Neuer Port";
+
+    [ObservableProperty]
+    private string _editPortName = string.Empty;
+
+    [ObservableProperty]
+    private PortRow? _selectedPort;
+
+    [ObservableProperty]
+    private bool _hideSystemPorts;
+
+    [ObservableProperty]
+    private string _portSearchText = string.Empty;
+
+    [ObservableProperty]
+    private string _selectedPortOwnerFilter = PortOwnerAll;
+
+    [ObservableProperty]
+    private string _selectedPortDirectionFilter = PortDirectionAll;
 
     [ObservableProperty]
     private string? _selectedSourceEndpointId;
@@ -19,25 +56,16 @@ public partial class RoutingViewModel : ObservableObject
     private string? _selectedTargetEndpointId;
 
     [ObservableProperty]
-    private string _newLoopbackName = "Loopback";
+    private string _routeChannelsText = "alle";
 
     [ObservableProperty]
-    private string? _selectedLoopbackEndpointId;
+    private string _routeTypesText = "alle";
+
+    [ObservableProperty]
+    private bool _routeEnabled = true;
 
     [ObservableProperty]
     private Guid? _selectedRouteId;
-
-    [ObservableProperty]
-    private bool _selectedRouteEnabled = true;
-
-    [ObservableProperty]
-    private string _selectedRouteChannelsText = string.Empty;
-
-    [ObservableProperty]
-    private string _selectedRouteMessageTypesText = string.Empty;
-
-    [ObservableProperty]
-    private string _validationMessage = string.Empty;
 
     public RoutingViewModel(RouteMatrix routeMatrix, IMidiEndpointCatalog endpointCatalog)
     {
@@ -45,73 +73,40 @@ public partial class RoutingViewModel : ObservableObject
         _endpointCatalog = endpointCatalog;
 
         _routeMatrix.RoutesChanged += (_, _) => RunOnUiThread(RefreshRoutes);
-        _endpointCatalog.EndpointsChanged += (_, _) => RunOnUiThread(RefreshEndpoints);
+        _endpointCatalog.EndpointsChanged += (_, _) => RunOnUiThread(RefreshPorts);
 
-        RefreshEndpoints();
+        RefreshPorts();
         RefreshRoutes();
     }
 
-    public ObservableCollection<MidiEndpointDescriptor> Endpoints { get; } = [];
+    public ObservableCollection<PortRow> Ports { get; } = [];
 
     public ObservableCollection<MidiEndpointDescriptor> SourceEndpoints { get; } = [];
 
     public ObservableCollection<MidiEndpointDescriptor> TargetEndpoints { get; } = [];
 
-    public ObservableCollection<MidiEndpointDescriptor> LoopbackEndpoints { get; } = [];
+    public ObservableCollection<RouteRow> Routes { get; } = [];
 
-    public ObservableCollection<RouteGridRow> Routes { get; } = [];
+    public event EventHandler? EditPortFocusRequested;
 
-    [RelayCommand(CanExecute = nameof(CanAddRoute))]
-    private void AddRoute()
+    public ObservableCollection<string> PortOwnerFilters { get; } =
+    [
+        PortOwnerAll,
+        PortOwnerSystem,
+        PortOwnerApp
+    ];
+
+    public ObservableCollection<string> PortDirectionFilters { get; } =
+    [
+        PortDirectionAll,
+        PortDirectionInOut,
+        PortDirectionInput,
+        PortDirectionOutput
+    ];
+
+    public async Task InitializeAsync()
     {
-        ValidationMessage = string.Empty;
-
-        var route = new RouteDefinition(
-            Guid.NewGuid(),
-            SelectedSourceEndpointId!,
-            SelectedTargetEndpointId!,
-            enabled: true,
-            filter: RouteFilter.AllowAll);
-
-        _routeMatrix.AddOrUpdateRoute(route);
-    }
-
-    [RelayCommand]
-    private void RemoveRoute(Guid routeId)
-    {
-        ValidationMessage = string.Empty;
-        _routeMatrix.RemoveRoute(routeId);
-    }
-
-    [RelayCommand(CanExecute = nameof(CanApplyRouteSettings))]
-    private void ApplyRouteSettings()
-    {
-        ValidationMessage = string.Empty;
-
-        var currentRoute = _routeMatrix.GetRoutes().FirstOrDefault(route => route.Id == SelectedRouteId);
-        if (currentRoute is null)
-        {
-            return;
-        }
-
-        try
-        {
-            var channels = ParseChannels(SelectedRouteChannelsText);
-            var messageTypes = ParseMessageTypes(SelectedRouteMessageTypesText);
-
-            var updatedRoute = new RouteDefinition(
-                currentRoute.Id,
-                currentRoute.SourceEndpointId,
-                currentRoute.TargetEndpointId,
-                SelectedRouteEnabled,
-                new RouteFilter(channels, messageTypes));
-
-            _routeMatrix.AddOrUpdateRoute(updatedRoute);
-        }
-        catch (FormatException ex)
-        {
-            ValidationMessage = ex.Message;
-        }
+        await RefreshEndpointsAsync();
     }
 
     [RelayCommand]
@@ -121,156 +116,295 @@ public partial class RoutingViewModel : ObservableObject
         {
             ValidationMessage = string.Empty;
             await _endpointCatalog.RefreshAsync();
-            RefreshEndpoints();
+            RefreshPorts();
+            ServiceHealthStatus = $"System-Ports geladen: {Ports.Count}";
         }
         catch (Exception ex)
         {
+            ServiceHealthStatus = $"Port-Service nicht verfügbar";
             ValidationMessage = $"Port-Refresh fehlgeschlagen: {ex.Message}";
         }
     }
 
     [RelayCommand]
-    private async Task CreateLoopbackAsync()
+    private async Task CreatePortAsync()
     {
         try
         {
             ValidationMessage = string.Empty;
-            var endpoint = await _endpointCatalog.CreateLoopbackEndpointAsync(NewLoopbackName);
-            await _endpointCatalog.RefreshAsync();
-
-            SelectedLoopbackEndpointId = endpoint.Id;
-            SelectedSourceEndpointId = endpoint.Id;
-            SelectedTargetEndpointId = endpoint.Id;
+            var created = await _endpointCatalog.CreateLoopbackEndpointAsync(NewPortName);
+            _createdPortPriority[created.Id] = ++_createdPortCounter;
+            RefreshPorts();
+            SelectedPort = Ports.FirstOrDefault(port => string.Equals(port.Id, created.Id, StringComparison.OrdinalIgnoreCase));
+            EditPortFocusRequested?.Invoke(this, EventArgs.Empty);
+            ValidationMessage = $"Port '{created.Name}' erstellt.";
         }
         catch (Exception ex)
         {
-            ValidationMessage = $"Loopback-Erstellung fehlgeschlagen: {ex.Message}";
+            ValidationMessage = $"Port konnte nicht erstellt werden: {ex.Message}";
         }
     }
 
-    [RelayCommand(CanExecute = nameof(CanDeleteLoopback))]
-    private async Task DeleteLoopbackAsync()
+    [RelayCommand(CanExecute = nameof(CanEditSelectedAppPort))]
+    private async Task RenamePortAsync()
     {
+        if (SelectedPort is null)
+        {
+            return;
+        }
+
         try
         {
             ValidationMessage = string.Empty;
-            if (string.IsNullOrWhiteSpace(SelectedLoopbackEndpointId))
+            var renamed = await _endpointCatalog.RenameLoopbackEndpointAsync(SelectedPort.Id, EditPortName);
+            if (!renamed)
             {
+                ValidationMessage = "Port konnte nicht umbenannt werden.";
                 return;
             }
 
-            var endpointId = SelectedLoopbackEndpointId;
-            var removed = await _endpointCatalog.DeleteLoopbackEndpointAsync(endpointId);
+            RefreshPorts();
+            ValidationMessage = "Port wurde umbenannt.";
+        }
+        catch (Exception ex)
+        {
+            ValidationMessage = $"Port umbenennen fehlgeschlagen: {ex.Message}";
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanEditSelectedAppPort))]
+    private async Task DeletePortAsync()
+    {
+        if (SelectedPort is null)
+        {
+            return;
+        }
+
+        try
+        {
+            ValidationMessage = string.Empty;
+            var removed = await _endpointCatalog.DeleteLoopbackEndpointAsync(SelectedPort.Id);
             if (!removed)
             {
-                ValidationMessage = "Loopback-Port konnte nicht geloescht werden.";
+                ValidationMessage = "Port konnte nicht gelöscht werden.";
                 return;
             }
 
-            var affectedRoutes = _routeMatrix
+            var routesToRemove = _routeMatrix
                 .GetRoutes()
                 .Where(route =>
-                    string.Equals(route.SourceEndpointId, endpointId, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(route.TargetEndpointId, endpointId, StringComparison.OrdinalIgnoreCase))
+                    string.Equals(route.SourceEndpointId, SelectedPort.Id, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(route.TargetEndpointId, SelectedPort.Id, StringComparison.OrdinalIgnoreCase))
                 .Select(route => route.Id)
                 .ToList();
 
-            foreach (var routeId in affectedRoutes)
+            foreach (var routeId in routesToRemove)
             {
                 _routeMatrix.RemoveRoute(routeId);
             }
 
-            await _endpointCatalog.RefreshAsync();
+            RefreshPorts();
+            ValidationMessage = "Port wurde gelöscht.";
         }
         catch (Exception ex)
         {
-            ValidationMessage = $"Loopback-Loeschen fehlgeschlagen: {ex.Message}";
+            ValidationMessage = $"Port löschen fehlgeschlagen: {ex.Message}";
         }
     }
 
-    private bool CanAddRoute()
+    [RelayCommand(CanExecute = nameof(CanSaveRoute))]
+    private void SaveRoute()
     {
-        if (string.IsNullOrWhiteSpace(SelectedSourceEndpointId) || string.IsNullOrWhiteSpace(SelectedTargetEndpointId))
+        try
         {
-            return false;
-        }
+            ValidationMessage = string.Empty;
 
-        if (string.Equals(SelectedSourceEndpointId, SelectedTargetEndpointId, StringComparison.OrdinalIgnoreCase))
+            var route = new RouteDefinition(
+                SelectedRouteId ?? Guid.NewGuid(),
+                SelectedSourceEndpointId!,
+                SelectedTargetEndpointId!,
+                RouteEnabled,
+                new RouteFilter(ParseChannels(RouteChannelsText), ParseMessageTypes(RouteTypesText)));
+
+            _routeMatrix.AddOrUpdateRoute(route);
+            SelectedRouteId = route.Id;
+        }
+        catch (Exception ex)
         {
-            return false;
+            ValidationMessage = ex.Message;
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanDeleteRoute))]
+    private void DeleteRoute()
+    {
+        if (!SelectedRouteId.HasValue)
+        {
+            return;
         }
 
-        var source = Endpoints.FirstOrDefault(endpoint =>
-            string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase));
-        var target = Endpoints.FirstOrDefault(endpoint =>
-            string.Equals(endpoint.Id, SelectedTargetEndpointId, StringComparison.OrdinalIgnoreCase));
-
-        return source?.SupportsInput == true && target?.SupportsOutput == true;
+        _routeMatrix.RemoveRoute(SelectedRouteId.Value);
+        NewRoute();
     }
 
-    private bool CanDeleteLoopback()
+    [RelayCommand]
+    private void NewRoute()
     {
-        return !string.IsNullOrWhiteSpace(SelectedLoopbackEndpointId);
+        SelectedRouteId = null;
+        RouteEnabled = true;
+        RouteChannelsText = "alle";
+        RouteTypesText = "alle";
+
+        if (SourceEndpoints.Count > 0)
+        {
+            SelectedSourceEndpointId = SourceEndpoints[0].Id;
+        }
+
+        if (TargetEndpoints.Count > 0)
+        {
+            var preferred = TargetEndpoints.FirstOrDefault(endpoint =>
+                !string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase)) ?? TargetEndpoints[0];
+            SelectedTargetEndpointId = preferred.Id;
+        }
+
+        SaveRouteCommand.NotifyCanExecuteChanged();
+        DeleteRouteCommand.NotifyCanExecuteChanged();
     }
 
-    private bool CanApplyRouteSettings()
-    {
-        return SelectedRouteId.HasValue;
-    }
-
-    partial void OnSelectedSourceEndpointIdChanged(string? value)
-    {
-        AddRouteCommand.NotifyCanExecuteChanged();
-    }
-
-    partial void OnSelectedTargetEndpointIdChanged(string? value)
-    {
-        AddRouteCommand.NotifyCanExecuteChanged();
-    }
-
-    partial void OnSelectedLoopbackEndpointIdChanged(string? value)
-    {
-        DeleteLoopbackCommand.NotifyCanExecuteChanged();
-    }
-
-    partial void OnSelectedRouteIdChanged(Guid? value)
-    {
-        UpdateSelectedRouteEditorState(value);
-        ApplyRouteSettingsCommand.NotifyCanExecuteChanged();
-    }
-
-    private void UpdateSelectedRouteEditorState(Guid? routeId)
+    [RelayCommand]
+    private void SelectRoute(Guid routeId)
     {
         var route = _routeMatrix.GetRoutes().FirstOrDefault(candidate => candidate.Id == routeId);
         if (route is null)
         {
-            SelectedRouteEnabled = true;
-            SelectedRouteChannelsText = string.Empty;
-            SelectedRouteMessageTypesText = string.Empty;
             return;
         }
 
-        SelectedRouteEnabled = route.Enabled;
-        SelectedRouteChannelsText = route.Filter.Channels.Count == 0
-            ? "alle"
-            : string.Join(", ", route.Filter.Channels.OrderBy(channel => channel));
-        SelectedRouteMessageTypesText = route.Filter.MessageTypes.Count == 0
-            ? "alle"
-            : string.Join(", ", route.Filter.MessageTypes.OrderBy(type => type.ToString()));
+        SelectedRouteId = route.Id;
+        SelectedSourceEndpointId = route.SourceEndpointId;
+        SelectedTargetEndpointId = route.TargetEndpointId;
+        RouteEnabled = route.Enabled;
+        RouteChannelsText = route.Filter.Channels.Count == 0 ? "alle" : string.Join(", ", route.Filter.Channels.OrderBy(channel => channel));
+        RouteTypesText = route.Filter.MessageTypes.Count == 0 ? "alle" : string.Join(", ", route.Filter.MessageTypes.OrderBy(type => type.ToString()));
+
+        SaveRouteCommand.NotifyCanExecuteChanged();
+        DeleteRouteCommand.NotifyCanExecuteChanged();
     }
 
-    private void RefreshEndpoints()
+    partial void OnSelectedPortChanged(PortRow? value)
     {
-        var snapshot = _endpointCatalog.GetEndpoints();
+        EditPortName = value?.Name ?? string.Empty;
+        RenamePortCommand.NotifyCanExecuteChanged();
+        DeletePortCommand.NotifyCanExecuteChanged();
+    }
 
-        Endpoints.Clear();
+    partial void OnEditPortNameChanged(string value)
+    {
+        RenamePortCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnSelectedSourceEndpointIdChanged(string? value)
+    {
+        SaveRouteCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnHideSystemPortsChanged(bool value)
+    {
+        RefreshPorts();
+    }
+
+    partial void OnPortSearchTextChanged(string value)
+    {
+        RefreshPorts();
+    }
+
+    partial void OnSelectedPortOwnerFilterChanged(string value)
+    {
+        RefreshPorts();
+    }
+
+    partial void OnSelectedPortDirectionFilterChanged(string value)
+    {
+        RefreshPorts();
+    }
+
+    partial void OnSelectedTargetEndpointIdChanged(string? value)
+    {
+        SaveRouteCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnSelectedRouteIdChanged(Guid? value)
+    {
+        if (value.HasValue)
+        {
+            SelectRoute(value.Value);
+        }
+
+        DeleteRouteCommand.NotifyCanExecuteChanged();
+    }
+
+    private bool CanEditSelectedAppPort()
+    {
+        return SelectedPort is { IsUserManaged: true };
+    }
+
+    private bool CanSaveRoute()
+    {
+        return !string.IsNullOrWhiteSpace(SelectedSourceEndpointId) &&
+               !string.IsNullOrWhiteSpace(SelectedTargetEndpointId) &&
+               !string.Equals(SelectedSourceEndpointId, SelectedTargetEndpointId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool CanDeleteRoute()
+    {
+        return SelectedRouteId.HasValue;
+    }
+
+    private void RefreshPorts()
+    {
+        var endpoints = _endpointCatalog.GetEndpoints().ToList();
+
+        // Keep priority map in sync when ports were removed.
+        var knownIds = endpoints
+            .Select(endpoint => endpoint.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var staleId in _createdPortPriority.Keys.Where(id => !knownIds.Contains(id)).ToList())
+        {
+            _createdPortPriority.Remove(staleId);
+        }
+
+        var portSnapshot = endpoints
+            .Where(ShouldIncludeInPortList)
+            .OrderByDescending(endpoint =>
+                _createdPortPriority.TryGetValue(endpoint.Id, out var priority) ? priority : 0)
+            .ThenBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var routingSnapshot = endpoints
+            .OrderBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var selectedPortId = SelectedPort?.Id;
+
+        Ports.Clear();
         SourceEndpoints.Clear();
         TargetEndpoints.Clear();
-        LoopbackEndpoints.Clear();
 
-        foreach (var endpoint in snapshot)
+        foreach (var endpoint in portSnapshot)
         {
-            Endpoints.Add(endpoint);
+            Ports.Add(new PortRow(
+                endpoint.Id,
+                FormatPortDisplayName(endpoint),
+                endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System",
+                GetDirection(endpoint),
+                endpoint.IsOnline ? "Online" : "Offline",
+                endpoint.IsUserManaged ? "App" : "System",
+                endpoint.IsUserManaged));
+        }
+
+        foreach (var endpoint in routingSnapshot)
+        {
             if (endpoint.SupportsInput)
             {
                 SourceEndpoints.Add(endpoint);
@@ -280,139 +414,201 @@ public partial class RoutingViewModel : ObservableObject
             {
                 TargetEndpoints.Add(endpoint);
             }
-
-            if (endpoint.Kind == MidiEndpointKind.Loopback)
-            {
-                LoopbackEndpoints.Add(endpoint);
-            }
         }
 
-        if (SourceEndpoints.Count > 0 && SourceEndpoints.All(endpoint => endpoint.Id != SelectedSourceEndpointId))
+        SelectedPort = selectedPortId is null
+            ? Ports.FirstOrDefault()
+            : Ports.FirstOrDefault(port => string.Equals(port.Id, selectedPortId, StringComparison.OrdinalIgnoreCase))
+              ?? Ports.FirstOrDefault();
+
+        if (SelectedSourceEndpointId is null || SourceEndpoints.All(endpoint => endpoint.Id != SelectedSourceEndpointId))
         {
-            SelectedSourceEndpointId = SourceEndpoints[0].Id;
+            SelectedSourceEndpointId = SourceEndpoints.FirstOrDefault()?.Id;
         }
 
-        if (TargetEndpoints.Count > 0 && TargetEndpoints.All(endpoint => endpoint.Id != SelectedTargetEndpointId))
+        if (SelectedTargetEndpointId is null || TargetEndpoints.All(endpoint => endpoint.Id != SelectedTargetEndpointId))
         {
-            var preferredTarget = TargetEndpoints
-                .FirstOrDefault(endpoint => !string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase))
-                ?? TargetEndpoints[0];
-            SelectedTargetEndpointId = preferredTarget.Id;
+            var preferred = TargetEndpoints.FirstOrDefault(endpoint =>
+                !string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase));
+            SelectedTargetEndpointId = preferred?.Id ?? TargetEndpoints.FirstOrDefault()?.Id;
         }
 
-        if (LoopbackEndpoints.Count == 0)
+        SaveRouteCommand.NotifyCanExecuteChanged();
+    }
+
+    private bool ShouldIncludeInPortList(MidiEndpointDescriptor endpoint)
+    {
+        if (HideSystemPorts && !endpoint.IsUserManaged)
         {
-            SelectedLoopbackEndpointId = null;
-        }
-        else if (LoopbackEndpoints.All(endpoint => endpoint.Id != SelectedLoopbackEndpointId))
-        {
-            SelectedLoopbackEndpointId = LoopbackEndpoints[0].Id;
+            return false;
         }
 
-        AddRouteCommand.NotifyCanExecuteChanged();
-        DeleteLoopbackCommand.NotifyCanExecuteChanged();
+        if (!MatchesOwnerFilter(endpoint) || !MatchesDirectionFilter(endpoint))
+        {
+            return false;
+        }
+
+        return MatchesSearch(endpoint);
+    }
+
+    private bool MatchesOwnerFilter(MidiEndpointDescriptor endpoint)
+    {
+        return SelectedPortOwnerFilter switch
+        {
+            PortOwnerSystem => !endpoint.IsUserManaged,
+            PortOwnerApp => endpoint.IsUserManaged,
+            _ => true
+        };
+    }
+
+    private bool MatchesDirectionFilter(MidiEndpointDescriptor endpoint)
+    {
+        return SelectedPortDirectionFilter switch
+        {
+            PortDirectionInOut => endpoint.SupportsInput && endpoint.SupportsOutput,
+            PortDirectionInput => endpoint.SupportsInput && !endpoint.SupportsOutput,
+            PortDirectionOutput => endpoint.SupportsOutput && !endpoint.SupportsInput,
+            _ => true
+        };
+    }
+
+    private bool MatchesSearch(MidiEndpointDescriptor endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(PortSearchText))
+        {
+            return true;
+        }
+
+        var search = PortSearchText.Trim();
+        if (search.Length == 0)
+        {
+            return true;
+        }
+
+        if (endpoint.Name.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+            endpoint.Id.Contains(search, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var owner = endpoint.IsUserManaged ? PortOwnerApp : PortOwnerSystem;
+        var type = endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System";
+        var direction = GetDirection(endpoint);
+
+        return owner.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+               type.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+               direction.Contains(search, StringComparison.OrdinalIgnoreCase);
     }
 
     private void RefreshRoutes()
     {
-        var selectedRouteId = SelectedRouteId;
-        var routeSnapshot = _routeMatrix.GetRoutes();
+        var endpointLookup = _endpointCatalog.GetEndpoints()
+            .ToDictionary(endpoint => endpoint.Id, endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase);
 
+        var selectedRouteId = SelectedRouteId;
         Routes.Clear();
-        foreach (var route in routeSnapshot)
+
+        foreach (var route in _routeMatrix.GetRoutes())
         {
-            Routes.Add(new RouteGridRow(
+            Routes.Add(new RouteRow(
                 route.Id,
-                route.SourceEndpointId,
-                ResolveEndpointName(route.SourceEndpointId),
-                route.TargetEndpointId,
-                ResolveEndpointName(route.TargetEndpointId),
+                endpointLookup.TryGetValue(route.SourceEndpointId, out var sourceName) ? sourceName : route.SourceEndpointId,
+                endpointLookup.TryGetValue(route.TargetEndpointId, out var targetName) ? targetName : route.TargetEndpointId,
                 route.Enabled,
-                route.Filter.Channels.Count == 0
-                    ? "alle"
-                    : string.Join(", ", route.Filter.Channels.OrderBy(channel => channel)),
-                route.Filter.MessageTypes.Count == 0
-                    ? "alle"
-                    : string.Join(", ", route.Filter.MessageTypes.OrderBy(type => type.ToString()))));
+                route.Filter.Channels.Count == 0 ? "alle" : string.Join(", ", route.Filter.Channels.OrderBy(channel => channel)),
+                route.Filter.MessageTypes.Count == 0 ? "alle" : string.Join(", ", route.Filter.MessageTypes.OrderBy(type => type.ToString()))));
         }
 
         if (selectedRouteId.HasValue && Routes.Any(route => route.Id == selectedRouteId.Value))
         {
-            SelectedRouteId = selectedRouteId.Value;
+            SelectRoute(selectedRouteId.Value);
         }
-        else
+    }
+
+    private static string GetDirection(MidiEndpointDescriptor endpoint)
+    {
+        return endpoint switch
         {
-            SelectedRouteId = Routes.FirstOrDefault()?.Id;
+            { SupportsInput: true, SupportsOutput: true } => "In/Out",
+            { SupportsInput: true } => "Input",
+            { SupportsOutput: true } => "Output",
+            _ => "-"
+        };
+    }
+
+    private static string FormatPortDisplayName(MidiEndpointDescriptor endpoint)
+    {
+        if (endpoint.IsUserManaged)
+        {
+            return endpoint.Name;
         }
 
-        UpdateSelectedRouteEditorState(SelectedRouteId);
+        return endpoint.Name.StartsWith("[System]", StringComparison.OrdinalIgnoreCase)
+            ? endpoint.Name
+            : $"[System] {endpoint.Name}";
     }
 
-    private string ResolveEndpointName(string endpointId)
+    private static IReadOnlyCollection<int> ParseChannels(string text)
     {
-        return Endpoints.FirstOrDefault(endpoint => string.Equals(endpoint.Id, endpointId, StringComparison.OrdinalIgnoreCase))
-            ?.Name ?? endpointId;
-    }
-
-    private static IReadOnlyList<int> ParseChannels(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text) || IsAllowAllToken(text))
+        if (string.IsNullOrWhiteSpace(text) || IsAllowAll(text))
         {
             return [];
         }
 
         var channels = new HashSet<int>();
-        foreach (var token in Tokenize(text))
+        foreach (var token in SplitTokens(text))
         {
             if (!int.TryParse(token, out var channel) || channel is < 1 or > 16)
             {
-                throw new FormatException("Kanaele muessen als Zahlen 1-16 angegeben werden.");
+                throw new FormatException("Kanaele muessen 1 bis 16 sein.");
             }
 
             channels.Add(channel);
         }
 
-        return channels.OrderBy(channel => channel).ToList();
+        return channels;
     }
 
-    private static IReadOnlyList<MidiMessageType> ParseMessageTypes(string text)
+    private static IReadOnlyCollection<MidiMessageType> ParseMessageTypes(string text)
     {
-        if (string.IsNullOrWhiteSpace(text) || IsAllowAllToken(text))
+        if (string.IsNullOrWhiteSpace(text) || IsAllowAll(text))
         {
             return [];
         }
 
-        var messageTypes = new HashSet<MidiMessageType>();
-        foreach (var token in Tokenize(text))
+        var types = new HashSet<MidiMessageType>();
+        foreach (var token in SplitTokens(text))
         {
-            var messageType = token.ToLowerInvariant() switch
+            var normalized = token.ToLowerInvariant();
+            var parsed = normalized switch
             {
                 "noteon" or "note-on" => MidiMessageType.NoteOn,
                 "noteoff" or "note-off" => MidiMessageType.NoteOff,
-                "cc" or "controlchange" or "control-change" => MidiMessageType.ControlChange,
-                "pc" or "programchange" or "program-change" => MidiMessageType.ProgramChange,
-                "pitchbend" or "pitch-bend" => MidiMessageType.PitchBend,
-                "sysex" or "sys-ex" => MidiMessageType.SysEx,
+                "cc" or "controlchange" => MidiMessageType.ControlChange,
+                "pc" or "programchange" => MidiMessageType.ProgramChange,
+                "pitchbend" => MidiMessageType.PitchBend,
+                "sysex" => MidiMessageType.SysEx,
                 "clock" => MidiMessageType.Clock,
-                _ => throw new FormatException($"Unbekannter Message-Typ: {token}")
+                _ => throw new FormatException($"Unbekannter Typ: {token}")
             };
 
-            messageTypes.Add(messageType);
+            types.Add(parsed);
         }
 
-        return messageTypes.OrderBy(type => type.ToString()).ToList();
+        return types;
     }
 
-    private static IEnumerable<string> Tokenize(string text)
+    private static IEnumerable<string> SplitTokens(string text)
     {
         return text.Split([',', ';', '|', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
-    private static bool IsAllowAllToken(string text)
+    private static bool IsAllowAll(string text)
     {
-        return string.Equals(text.Trim(), "alle", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(text.Trim(), "all", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(text.Trim(), "*", StringComparison.OrdinalIgnoreCase);
+        var value = text.Trim();
+        return string.Equals(value, "alle", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "all", StringComparison.OrdinalIgnoreCase) ||
+               value == "*";
     }
 
     private static void RunOnUiThread(Action action)
@@ -427,11 +623,18 @@ public partial class RoutingViewModel : ObservableObject
         _ = dispatcher.InvokeAsync(action);
     }
 
-    public sealed record RouteGridRow(
+    public sealed record PortRow(
+        string Id,
+        string Name,
+        string Type,
+        string Direction,
+        string Status,
+        string Owner,
+        bool IsUserManaged);
+
+    public sealed record RouteRow(
         Guid Id,
-        string SourceEndpointId,
         string SourceName,
-        string TargetEndpointId,
         string TargetName,
         bool Enabled,
         string Channels,

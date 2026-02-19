@@ -9,48 +9,117 @@
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="12" />
+            <RowDefinition Height="10" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="12" />
+            <RowDefinition Height="10" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <StackPanel Orientation="Horizontal">
-            <ToggleButton Content="Pause"
+        <Grid Grid.Row="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="10" />
+                <ColumnDefinition Width="220" />
+                <ColumnDefinition Width="8" />
+                <ColumnDefinition Width="170" />
+                <ColumnDefinition Width="8" />
+                <ColumnDefinition Width="180" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <ToggleButton Grid.Column="0"
+                          Content="Pause"
                           IsChecked="{Binding IsPaused, Mode=TwoWay}"
-                          Width="120"
-                          Margin="0,0,8,0" />
-            <Button Content="Clear"
-                    Command="{Binding ClearCommand}"
-                    Width="100" />
-        </StackPanel>
+                          Width="110" />
+
+            <ComboBox Grid.Column="2"
+                      ItemsSource="{Binding EndpointFilters}"
+                      SelectedItem="{Binding SelectedEndpointFilter, Mode=TwoWay}"
+                      DisplayMemberPath="Label" />
+
+            <ComboBox Grid.Column="4"
+                      ItemsSource="{Binding ChannelFilters}"
+                      SelectedItem="{Binding SelectedChannelFilter, Mode=TwoWay}"
+                      DisplayMemberPath="Label" />
+
+            <ComboBox Grid.Column="6"
+                      ItemsSource="{Binding MessageTypeFilters}"
+                      SelectedItem="{Binding SelectedMessageTypeFilter, Mode=TwoWay}"
+                      DisplayMemberPath="Label" />
+
+            <StackPanel Grid.Column="7"
+                        Orientation="Horizontal"
+                        HorizontalAlignment="Right">
+                <Button Content="CSV Export"
+                        Command="{Binding ExportCsvCommand}"
+                        MinWidth="110"
+                        Margin="0,0,8,0" />
+                <Button Content="Clear"
+                        Command="{Binding ClearCommand}"
+                        MinWidth="90" />
+            </StackPanel>
+        </Grid>
 
         <DataGrid Grid.Row="2"
                   AutoGenerateColumns="False"
                   CanUserAddRows="False"
                   ItemsSource="{Binding TrafficSnapshots}"
                   IsReadOnly="True"
-                  MaxHeight="160">
+                  MaxHeight="170">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Endpoint" Binding="{Binding EndpointId}" Width="2*" />
                 <DataGridTextColumn Header="Msgs/s" Binding="{Binding MessagesPerSecond, StringFormat=F1}" Width="*" />
                 <DataGridTextColumn Header="Bytes/s" Binding="{Binding BytesPerSecond, StringFormat=F1}" Width="*" />
                 <DataGridTextColumn Header="Channels" Binding="{Binding ActiveChannelsText}" Width="2*" />
+                <DataGridTextColumn Header="Snapshot" Binding="{Binding CapturedAtUtc, StringFormat=HH:mm:ss}" Width="*" />
             </DataGrid.Columns>
         </DataGrid>
 
-        <DataGrid Grid.Row="4"
-                  AutoGenerateColumns="False"
-                  CanUserAddRows="False"
+        <ListView Grid.Row="4"
                   ItemsSource="{Binding Entries}"
-                  IsReadOnly="True">
-            <DataGrid.Columns>
-                <DataGridTextColumn Header="Zeit" Binding="{Binding Timestamp}" Width="2*" />
-                <DataGridTextColumn Header="Endpoint" Binding="{Binding EndpointName}" Width="2*" />
-                <DataGridTextColumn Header="Channel" Binding="{Binding Channel}" Width="*" />
-                <DataGridTextColumn Header="Typ" Binding="{Binding MessageType}" Width="*" />
-                <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="3*" />
-            </DataGrid.Columns>
-        </DataGrid>
+                  ScrollViewer.CanContentScroll="True"
+                  VirtualizingPanel.IsVirtualizing="True"
+                  VirtualizingPanel.VirtualizationMode="Recycling">
+            <ListView.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <VirtualizingStackPanel />
+                </ItemsPanelTemplate>
+            </ListView.ItemsPanel>
+
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <Grid Margin="0,1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="150" />
+                            <ColumnDefinition Width="230" />
+                            <ColumnDefinition Width="70" />
+                            <ColumnDefinition Width="120" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0"
+                                   Text="{Binding Timestamp, StringFormat=HH:mm:ss.fff}"
+                                   Foreground="{Binding TypeBrush}" />
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding EndpointName}"
+                                   Margin="8,0,0,0"
+                                   Foreground="{Binding TypeBrush}" />
+                        <TextBlock Grid.Column="2"
+                                   Text="{Binding Channel}"
+                                   Margin="8,0,0,0"
+                                   Foreground="{Binding TypeBrush}" />
+                        <TextBlock Grid.Column="3"
+                                   Text="{Binding MessageType}"
+                                   Margin="8,0,0,0"
+                                   Foreground="{Binding TypeBrush}" />
+                        <TextBlock Grid.Column="4"
+                                   Text="{Binding Detail}"
+                                   Margin="8,0,0,0"
+                                   Foreground="{Binding TypeBrush}"
+                                   TextTrimming="CharacterEllipsis" />
+                    </Grid>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
     </Grid>
 </UserControl>

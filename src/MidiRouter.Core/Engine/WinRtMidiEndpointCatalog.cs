@@ -1,4 +1,5 @@
 #if WINDOWS
+using NAudio.Midi;
 using System.Collections.ObjectModel;
 using Windows.Devices.Enumeration;
 using Windows.Devices.Midi;
@@ -29,7 +30,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                     MidiEndpointKind.Hardware,
                     pair.Value.SupportsInput,
                     pair.Value.SupportsOutput,
-                    pair.Value.IsOnline))
+                    pair.Value.IsOnline,
+                    IsUserManaged: false))
                 .Concat(_loopbackEndpoints.Values)
                 .OrderBy(endpoint => endpoint.Kind)
                 .ThenBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
@@ -42,7 +44,6 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     public async Task RefreshAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        EnsureWatchersStarted();
 
         await _refreshLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -73,6 +74,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                 };
             }
 
+            AppendWinMmEndpoints(snapshot);
+
             lock (_syncRoot)
             {
                 _hardwareEndpoints.Clear();
@@ -87,6 +90,10 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             _refreshLock.Release();
         }
 
+        // Start watchers after a full snapshot is available.
+        // This avoids early partial updates during startup that can make
+        // some endpoints appear a few seconds later in the UI.
+        EnsureWatchersStarted();
         EndpointsChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -100,7 +107,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             MidiEndpointKind.Loopback,
             SupportsInput: true,
             SupportsOutput: true,
-            IsOnline: true);
+            IsOnline: true,
+            IsUserManaged: true);
 
         lock (_syncRoot)
         {
@@ -132,6 +140,41 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         }
 
         return Task.FromResult(removed);
+    }
+
+    public Task<bool> RenameLoopbackEndpointAsync(string endpointId, string newName, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (string.IsNullOrWhiteSpace(endpointId) || string.IsNullOrWhiteSpace(newName))
+        {
+            return Task.FromResult(false);
+        }
+
+        bool renamed;
+        var safeName = newName.Trim();
+
+        lock (_syncRoot)
+        {
+            if (!_loopbackEndpoints.TryGetValue(endpointId, out var existing))
+            {
+                return Task.FromResult(false);
+            }
+
+            _loopbackEndpoints[endpointId] = existing with
+            {
+                Name = safeName
+            };
+
+            renamed = true;
+        }
+
+        if (renamed)
+        {
+            EndpointsChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        return Task.FromResult(renamed);
     }
 
     public void Dispose()
@@ -300,6 +343,25 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     private static string SafeDeviceName(DeviceInformation device)
     {
         return string.IsNullOrWhiteSpace(device.Name) ? device.Id : device.Name;
+    }
+
+    private static void AppendWinMmEndpoints(IDictionary<string, HardwareEndpointState> snapshot)
+    {
+        for (var index = 0; index < MidiIn.NumberOfDevices; index++)
+        {
+            var capabilities = MidiIn.DeviceInfo(index);
+            var endpointId = $"winmm-in:{index}";
+            var name = $"[System] {capabilities.ProductName}";
+            snapshot[endpointId] = new HardwareEndpointState(name, SupportsInput: true, SupportsOutput: false, IsOnline: true);
+        }
+
+        for (var index = 0; index < MidiOut.NumberOfDevices; index++)
+        {
+            var capabilities = MidiOut.DeviceInfo(index);
+            var endpointId = $"winmm-out:{index}";
+            var name = $"[System] {capabilities.ProductName}";
+            snapshot[endpointId] = new HardwareEndpointState(name, SupportsInput: false, SupportsOutput: true, IsOnline: true);
+        }
     }
 
     private sealed record HardwareEndpointState(

@@ -6,4 +6,5 @@ public sealed record MidiEndpointDescriptor(
     MidiEndpointKind Kind,
     bool SupportsInput = true,
     bool SupportsOutput = true,
-    bool IsOnline = true);
+    bool IsOnline = true,
+    bool IsUserManaged = false);

@@ -7,9 +7,9 @@ public sealed class InMemoryMidiEndpointCatalog : IMidiEndpointCatalog
     private readonly object _syncRoot = new();
     private readonly List<MidiEndpointDescriptor> _endpoints =
     [
-        new("hw:usb-keys", "USB Keys", MidiEndpointKind.Hardware, SupportsInput: true, SupportsOutput: true),
-        new("loop:1", "Loopback 1", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true),
-        new("loop:2", "Loopback 2", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true)
+        new("hw:usb-keys", "USB Keys", MidiEndpointKind.Hardware, SupportsInput: true, SupportsOutput: true, IsUserManaged: false),
+        new("loop:1", "Loopback 1", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true, IsUserManaged: true),
+        new("loop:2", "Loopback 2", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true, IsUserManaged: true)
     ];
 
     public event EventHandler? EndpointsChanged;
@@ -58,7 +58,8 @@ public sealed class InMemoryMidiEndpointCatalog : IMidiEndpointCatalog
             safeName,
             MidiEndpointKind.Loopback,
             SupportsInput: true,
-            SupportsOutput: true);
+            SupportsOutput: true,
+            IsUserManaged: true);
 
         lock (_syncRoot)
         {
@@ -95,6 +96,47 @@ public sealed class InMemoryMidiEndpointCatalog : IMidiEndpointCatalog
         }
 
         return Task.FromResult(removed);
+    }
+
+    public Task<bool> RenameLoopbackEndpointAsync(string endpointId, string newName, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (string.IsNullOrWhiteSpace(endpointId) || string.IsNullOrWhiteSpace(newName))
+        {
+            return Task.FromResult(false);
+        }
+
+        bool renamed = false;
+        var safeName = newName.Trim();
+
+        lock (_syncRoot)
+        {
+            for (var index = 0; index < _endpoints.Count; index++)
+            {
+                var endpoint = _endpoints[index];
+                if (endpoint.Kind != MidiEndpointKind.Loopback ||
+                    !string.Equals(endpoint.Id, endpointId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                _endpoints[index] = endpoint with
+                {
+                    Name = safeName
+                };
+
+                renamed = true;
+                break;
+            }
+        }
+
+        if (renamed)
+        {
+            EndpointsChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        return Task.FromResult(renamed);
     }
 }
 

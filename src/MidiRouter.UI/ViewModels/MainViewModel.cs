@@ -12,7 +12,6 @@ public partial class MainViewModel : ObservableObject
 {
     private readonly IConfigStore _configStore;
     private readonly RouteMatrix _routeMatrix;
-    private readonly IMidiEndpointCatalog _endpointCatalog;
     private readonly IMidiSession _midiSession;
     private readonly IMidiMessageLog _messageLog;
 
@@ -28,7 +27,6 @@ public partial class MainViewModel : ObservableObject
         SettingsViewModel settings,
         IConfigStore configStore,
         RouteMatrix routeMatrix,
-        IMidiEndpointCatalog endpointCatalog,
         IMidiSession midiSession,
         IMidiMessageLog messageLog)
     {
@@ -37,7 +35,6 @@ public partial class MainViewModel : ObservableObject
         Settings = settings;
         _configStore = configStore;
         _routeMatrix = routeMatrix;
-        _endpointCatalog = endpointCatalog;
         _midiSession = midiSession;
         _messageLog = messageLog;
 
@@ -54,7 +51,7 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
-            await _endpointCatalog.RefreshAsync();
+            await Routing.InitializeAsync();
             await ReloadConfig();
             StatusText = $"MIDI-Session: {GetStateText(_midiSession.State)}";
         }

@@ -40,13 +40,13 @@
         </Border>
 
         <TabControl Margin="12">
-            <TabItem Header="Routing">
+            <TabItem Header="Ports &amp; Routing">
                 <views:RoutingView DataContext="{Binding Routing}" />
             </TabItem>
-            <TabItem Header="Monitor">
+            <TabItem Header="Live Monitor">
                 <views:MonitorView DataContext="{Binding Monitor}" />
             </TabItem>
-            <TabItem Header="Settings">
+            <TabItem Header="Einstellungen">
                 <views:SettingsView DataContext="{Binding Settings}" />
             </TabItem>
         </TabControl>

@@ -9,88 +9,203 @@
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="10" />
+            <RowDefinition Height="8" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="12" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="12" />
+            <RowDefinition Height="8" />
+            <RowDefinition Height="2*" />
+            <RowDefinition Height="8" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="8" />
+            <RowDefinition Height="2*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <StackPanel Orientation="Horizontal">
-            <ComboBox Width="240"
-                      Margin="0,0,8,0"
-                      DisplayMemberPath="Name"
-                      SelectedValuePath="Id"
-                      SelectedValue="{Binding SelectedSourceEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                      ItemsSource="{Binding SourceEndpoints}" />
-            <TextBlock VerticalAlignment="Center"
-                       Margin="0,0,8,0"
-                       Text="->" />
-            <ComboBox Width="240"
-                      Margin="0,0,8,0"
-                      DisplayMemberPath="Name"
-                      SelectedValuePath="Id"
-                      SelectedValue="{Binding SelectedTargetEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                      ItemsSource="{Binding TargetEndpoints}" />
-            <Button Content="Route hinzufügen"
-                    Command="{Binding AddRouteCommand}"
-                    MinWidth="140"
-                    Margin="0,0,8,0" />
-            <Button Content="Ports aktualisieren"
-                    Command="{Binding RefreshEndpointsAsyncCommand}"
+        <DockPanel Grid.Row="0">
+            <TextBlock DockPanel.Dock="Left"
+                       VerticalAlignment="Center"
+                       FontWeight="SemiBold"
+                       Text="{Binding ServiceHealthStatus}" />
+            <Button DockPanel.Dock="Right"
+                    Content="Ports aktualisieren"
+                    Command="{Binding RefreshEndpointsCommand}"
                     MinWidth="140" />
-        </StackPanel>
+        </DockPanel>
 
-        <Grid Grid.Row="2">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
+        <Border Grid.Row="2"
+                BorderBrush="#33000000"
+                BorderThickness="1"
+                Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="10" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="6" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="8" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
 
-            <TextBox Grid.Column="0"
-                     Margin="0,0,8,0"
-                     Text="{Binding NewLoopbackName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Grid.ColumnSpan="3"
+                           FontWeight="SemiBold"
+                           Text="Port-Verwaltung" />
 
-            <Button Grid.Column="1"
-                    Content="Loopback erstellen"
-                    Command="{Binding CreateLoopbackAsyncCommand}"
-                    Margin="0,0,8,0"
-                    MinWidth="160" />
+                <StackPanel Grid.Row="2" Grid.Column="0" Orientation="Horizontal">
+                    <TextBox Width="220"
+                             Margin="0,0,8,0"
+                             Text="{Binding NewPortName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button Content="Port erstellen"
+                            Command="{Binding CreatePortCommand}"
+                            MinWidth="130" />
+                </StackPanel>
 
-            <StackPanel Grid.Column="2" Orientation="Horizontal">
-                <ComboBox Width="220"
-                          Margin="0,0,8,0"
-                          DisplayMemberPath="Name"
-                          SelectedValuePath="Id"
-                          SelectedValue="{Binding SelectedLoopbackEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                          ItemsSource="{Binding LoopbackEndpoints}" />
-                <Button Content="Loopback löschen"
-                        Command="{Binding DeleteLoopbackAsyncCommand}"
-                        MinWidth="160" />
-            </StackPanel>
-        </Grid>
+                <StackPanel Grid.Row="2" Grid.Column="2" Orientation="Horizontal">
+                    <TextBox x:Name="EditPortNameTextBox"
+                             Width="220"
+                             Margin="0,0,8,0"
+                             Text="{Binding EditPortName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button Content="Port ändern"
+                            Command="{Binding RenamePortCommand}"
+                            MinWidth="120"
+                            Margin="0,0,8,0" />
+                    <Button Content="Port löschen"
+                            Command="{Binding DeletePortCommand}"
+                            MinWidth="120" />
+                </StackPanel>
+
+                <StackPanel Grid.Row="4"
+                            Grid.ColumnSpan="3"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <CheckBox Content="System-Ports ausblenden"
+                              IsChecked="{Binding HideSystemPorts, Mode=TwoWay}"
+                              Margin="0,0,12,0" />
+                    <TextBox Width="220"
+                             Margin="0,0,8,0"
+                             ToolTip="Suche in Name, ID, Typ, Eigentümer, Richtung"
+                             Text="{Binding PortSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <ComboBox Width="160"
+                              Margin="0,0,8,0"
+                              ItemsSource="{Binding PortOwnerFilters}"
+                              SelectedItem="{Binding SelectedPortOwnerFilter, Mode=TwoWay}" />
+                    <ComboBox Width="160"
+                              ItemsSource="{Binding PortDirectionFilters}"
+                              SelectedItem="{Binding SelectedPortDirectionFilter, Mode=TwoWay}" />
+                </StackPanel>
+            </Grid>
+        </Border>
 
         <DataGrid Grid.Row="4"
                   AutoGenerateColumns="False"
                   CanUserAddRows="False"
-                  ItemsSource="{Binding Routes}"
                   IsReadOnly="True"
+                  ItemsSource="{Binding Ports}"
+                  SelectedItem="{Binding SelectedPort, Mode=TwoWay}"
+                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
+                <DataGridTextColumn Header="Typ" Binding="{Binding Type}" Width="*" />
+                <DataGridTextColumn Header="Richtung" Binding="{Binding Direction}" Width="*" />
+                <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="*" />
+                <DataGridTextColumn Header="Eigentümer" Binding="{Binding Owner}" Width="*" />
+                <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="3*" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <Border Grid.Row="6"
+                BorderBrush="#33000000"
+                BorderThickness="1"
+                Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="1*" />
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="6" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.ColumnSpan="6"
+                           FontWeight="SemiBold"
+                           Text="Routing" />
+
+                <ComboBox Grid.Row="2"
+                          Grid.Column="0"
+                          Margin="0,0,8,0"
+                          DisplayMemberPath="Name"
+                          SelectedValuePath="Id"
+                          SelectedValue="{Binding SelectedSourceEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                          ItemsSource="{Binding SourceEndpoints}" />
+
+                <ComboBox Grid.Row="2"
+                          Grid.Column="1"
+                          Margin="0,0,8,0"
+                          DisplayMemberPath="Name"
+                          SelectedValuePath="Id"
+                          SelectedValue="{Binding SelectedTargetEndpointId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                          ItemsSource="{Binding TargetEndpoints}" />
+
+                <CheckBox Grid.Row="2"
+                          Grid.Column="2"
+                          VerticalAlignment="Center"
+                          Content="Aktiv"
+                          IsChecked="{Binding RouteEnabled, Mode=TwoWay}" />
+
+                <TextBox Grid.Row="2"
+                         Grid.Column="3"
+                         Margin="8,0,8,0"
+                         Text="{Binding RouteChannelsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <TextBox Grid.Row="2"
+                         Grid.Column="4"
+                         Margin="0,0,8,0"
+                         Text="{Binding RouteTypesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <StackPanel Grid.Row="2" Grid.Column="5" Orientation="Horizontal">
+                    <Button Content="Neu"
+                            Command="{Binding NewRouteCommand}"
+                            MinWidth="70"
+                            Margin="0,0,8,0" />
+                    <Button Content="Speichern"
+                            Command="{Binding SaveRouteCommand}"
+                            MinWidth="90"
+                            Margin="0,0,8,0" />
+                    <Button Content="Entfernen"
+                            Command="{Binding DeleteRouteCommand}"
+                            MinWidth="90" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <DataGrid Grid.Row="8"
+                  AutoGenerateColumns="False"
+                  CanUserAddRows="False"
+                  IsReadOnly="True"
+                  ItemsSource="{Binding Routes}"
                   SelectedValuePath="Id"
-                  SelectedValue="{Binding SelectedRouteId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
+                  SelectedValue="{Binding SelectedRouteId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Source" Binding="{Binding SourceName}" Width="2*" />
                 <DataGridTextColumn Header="Target" Binding="{Binding TargetName}" Width="2*" />
-                <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled}" Width="Auto" />
+                <DataGridCheckBoxColumn Header="Aktiv" Binding="{Binding Enabled}" Width="*" />
                 <DataGridTextColumn Header="Kanäle" Binding="{Binding Channels}" Width="2*" />
                 <DataGridTextColumn Header="Typen" Binding="{Binding MessageTypes}" Width="2*" />
-                <DataGridTemplateColumn Header="Action" Width="Auto">
+                <DataGridTemplateColumn Header="Bearbeiten" Width="Auto">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
-                            <Button Content="Entfernen"
-                                    Padding="6,2"
-                                    Command="{Binding DataContext.RemoveRouteCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                            <Button Content="Laden"
+                                    Padding="8,2"
+                                    Command="{Binding DataContext.SelectRouteCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
                                     CommandParameter="{Binding Id}" />
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
@@ -98,48 +213,8 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <Border Grid.Row="6"
-                BorderBrush="#22000000"
-                BorderThickness="1"
-                Padding="10">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="220" />
-                    <ColumnDefinition Width="16" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="260" />
-                    <ColumnDefinition Width="16" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="260" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-
-                <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Aktiv:" Margin="0,0,8,0" />
-                <CheckBox Grid.Column="1"
-                          VerticalAlignment="Center"
-                          IsChecked="{Binding SelectedRouteEnabled, Mode=TwoWay}" />
-
-                <TextBlock Grid.Column="3" VerticalAlignment="Center" Text="Kanäle:" Margin="0,0,8,0" />
-                <TextBox Grid.Column="4"
-                         VerticalAlignment="Center"
-                         Text="{Binding SelectedRouteChannelsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-                <TextBlock Grid.Column="6" VerticalAlignment="Center" Text="Typen:" Margin="0,0,8,0" />
-                <TextBox Grid.Column="7"
-                         VerticalAlignment="Center"
-                         Text="{Binding SelectedRouteMessageTypesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-                <Button Grid.Column="8"
-                        Content="Route übernehmen"
-                        Command="{Binding ApplyRouteSettingsCommand}"
-                        HorizontalAlignment="Right"
-                        MinWidth="160" />
-            </Grid>
-        </Border>
-
-        <TextBlock Grid.Row="6"
-                   Margin="10,44,0,0"
+        <TextBlock Grid.Row="9"
+                   Margin="0,8,0,0"
                    Foreground="#B00020"
                    Text="{Binding ValidationMessage}" />
     </Grid>

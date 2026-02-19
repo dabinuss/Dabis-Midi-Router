@@ -19,6 +19,8 @@ public sealed class MidiRoutingWorker(
     private bool _routeEventsSubscribed;
     private volatile RouteIndex _routeIndex = RouteIndex.Empty;
 
+    public event EventHandler<RouteForwardedEventArgs>? RouteForwarded;
+
     public void Start()
     {
         lock (_syncRoot)
@@ -152,6 +154,11 @@ public sealed class MidiRoutingWorker(
 
                         trafficAnalyzer.RegisterMessage(route.TargetEndpointId, packet.Data.Length, packet.Channel);
                         messageLog.Add(CreateLogEntry(route.TargetEndpointId, packet, $"Routed from {ResolveEndpointName(route.SourceEndpointId)}"));
+                        RouteForwarded?.Invoke(this, new RouteForwardedEventArgs(
+                            route.Id,
+                            route.SourceEndpointId,
+                            route.TargetEndpointId,
+                            DateTimeOffset.UtcNow));
                     }
                     catch (Exception ex)
                     {
@@ -170,7 +177,7 @@ public sealed class MidiRoutingWorker(
     private MidiMessageLogEntry CreateLogEntry(string endpointId, MidiPacket packet, string detailPrefix)
     {
         var endpointName = ResolveEndpointName(endpointId);
-        var detail = $"{detailPrefix} {packet.MessageType} [{Convert.ToHexString(packet.Data)}]";
+        var detail = $"{detailPrefix} {FormatPacketDetail(packet)}";
         return new MidiMessageLogEntry(packet.TimestampUtc, endpointName, packet.Channel, packet.MessageType, detail);
     }
 
@@ -180,6 +187,40 @@ public sealed class MidiRoutingWorker(
             .GetEndpoints()
             .FirstOrDefault(endpoint => string.Equals(endpoint.Id, endpointId, StringComparison.OrdinalIgnoreCase))
             ?.Name ?? endpointId;
+    }
+
+    private static string FormatPacketDetail(MidiPacket packet)
+    {
+        var data = packet.Data;
+        if (data.Length == 0)
+        {
+            return "Empty";
+        }
+
+        return packet.MessageType switch
+        {
+            MidiMessageType.NoteOn or MidiMessageType.NoteOff when data.Length >= 3 =>
+                $"{packet.MessageType} {ToNoteName(data[1])} Vel:{data[2]}",
+            MidiMessageType.ControlChange when data.Length >= 3 =>
+                $"CC#{data[1]} Val:{data[2]}",
+            MidiMessageType.ProgramChange when data.Length >= 2 =>
+                $"Program {data[1]}",
+            MidiMessageType.PitchBend when data.Length >= 3 =>
+                $"Pitch {(data[1] | (data[2] << 7)) - 8192}",
+            MidiMessageType.SysEx =>
+                $"SysEx {data.Length} bytes",
+            MidiMessageType.Clock =>
+                $"Clock {data[0]:X2}",
+            _ => $"{packet.MessageType} [{Convert.ToHexString(data)}]"
+        };
+    }
+
+    private static string ToNoteName(byte note)
+    {
+        string[] noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        var name = noteNames[note % 12];
+        var octave = (note / 12) - 1;
+        return $"{name}{octave}";
     }
 
     private void OnRoutesChanged(object? sender, EventArgs args)
