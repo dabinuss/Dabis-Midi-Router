@@ -35,6 +35,7 @@ public partial class RoutingViewModel : ObservableObject
     private IReadOnlyList<MidiEndpointDescriptor> _cachedEndpoints = [];
     private bool _refreshRoutesAfterPortRefresh;
     private long _createdPortCounter;
+    private bool _isSynchronizingPortSelection;
 
     [ObservableProperty]
     private string _serviceHealthStatus = "Port-Check ausstehend";
@@ -50,6 +51,12 @@ public partial class RoutingViewModel : ObservableObject
 
     [ObservableProperty]
     private PortRow? _selectedPort;
+
+    [ObservableProperty]
+    private PortRow? _selectedAppPort;
+
+    [ObservableProperty]
+    private PortRow? _selectedSystemPort;
 
     [ObservableProperty]
     private bool _hideSystemPorts;
@@ -565,9 +572,32 @@ public partial class RoutingViewModel : ObservableObject
 
     partial void OnSelectedPortChanged(PortRow? value)
     {
+        SyncGridSelectionsFromSelectedPort(value);
         EditPortName = value?.Name ?? string.Empty;
         RenamePortCommand.NotifyCanExecuteChanged();
         DeletePortCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnSelectedAppPortChanged(PortRow? value)
+    {
+        if (value is null)
+        {
+            TryRestoreGridSelectionFromSelectedPort(isUserManagedSelection: true);
+            return;
+        }
+
+        SelectPortFromGrid(value, isUserManagedSelection: true);
+    }
+
+    partial void OnSelectedSystemPortChanged(PortRow? value)
+    {
+        if (value is null)
+        {
+            TryRestoreGridSelectionFromSelectedPort(isUserManagedSelection: false);
+            return;
+        }
+
+        SelectPortFromGrid(value, isUserManagedSelection: false);
     }
 
     partial void OnEditPortNameChanged(string value)
@@ -599,7 +629,6 @@ public partial class RoutingViewModel : ObservableObject
     {
         if (!string.IsNullOrWhiteSpace(value))
         {
-            SyncSelectedPortFromEndpointId(value);
             SelectRoutePort(value);
         }
 
@@ -610,7 +639,6 @@ public partial class RoutingViewModel : ObservableObject
     {
         if (!string.IsNullOrWhiteSpace(value))
         {
-            SyncSelectedPortFromEndpointId(value);
             SelectRoutePort(value);
         }
 
@@ -646,6 +674,118 @@ public partial class RoutingViewModel : ObservableObject
     private bool CanDeleteRoute()
     {
         return SelectedRouteId.HasValue;
+    }
+
+    private void SelectPortFromGrid(PortRow? value, bool isUserManagedSelection)
+    {
+        if (_isSynchronizingPortSelection || value is null)
+        {
+            return;
+        }
+
+        if (value.IsUserManaged != isUserManagedSelection)
+        {
+            return;
+        }
+
+        try
+        {
+            _isSynchronizingPortSelection = true;
+            SelectedPort = value;
+
+            if (isUserManagedSelection)
+            {
+                SelectedSystemPort = null;
+            }
+            else
+            {
+                SelectedAppPort = null;
+            }
+        }
+        finally
+        {
+            _isSynchronizingPortSelection = false;
+        }
+    }
+
+    private void SyncGridSelectionsFromSelectedPort(PortRow? value)
+    {
+        if (_isSynchronizingPortSelection)
+        {
+            return;
+        }
+
+        try
+        {
+            _isSynchronizingPortSelection = true;
+
+            if (value is null)
+            {
+                SelectedAppPort = null;
+                SelectedSystemPort = null;
+                return;
+            }
+
+            if (value.IsUserManaged)
+            {
+                if (!ReferenceEquals(SelectedAppPort, value))
+                {
+                    SelectedAppPort = value;
+                }
+
+                SelectedSystemPort = null;
+                return;
+            }
+
+            if (!ReferenceEquals(SelectedSystemPort, value))
+            {
+                SelectedSystemPort = value;
+            }
+
+            SelectedAppPort = null;
+        }
+        finally
+        {
+            _isSynchronizingPortSelection = false;
+        }
+    }
+
+    private void TryRestoreGridSelectionFromSelectedPort(bool isUserManagedSelection)
+    {
+        if (_isSynchronizingPortSelection || SelectedPort is null || SelectedPort.IsUserManaged != isUserManagedSelection)
+        {
+            return;
+        }
+
+        var restored = (isUserManagedSelection ? AppPorts : SystemPorts)
+            .FirstOrDefault(port => string.Equals(port.Id, SelectedPort.Id, StringComparison.OrdinalIgnoreCase));
+        if (restored is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _isSynchronizingPortSelection = true;
+            if (isUserManagedSelection)
+            {
+                if (!ReferenceEquals(SelectedAppPort, restored))
+                {
+                    SelectedAppPort = restored;
+                }
+            }
+            else
+            {
+                if (!ReferenceEquals(SelectedSystemPort, restored))
+                {
+                    SelectedSystemPort = restored;
+                }
+            }
+        }
+        finally
+        {
+            _isSynchronizingPortSelection = false;
+        }
     }
 
     private void HandleEndpointsChanged()
@@ -1096,19 +1236,6 @@ public partial class RoutingViewModel : ObservableObject
         return true;
     }
 
-    private void SyncSelectedPortFromEndpointId(string endpointId)
-    {
-        var resolvedEndpointId = _portListPrimaryByEndpointId.TryGetValue(endpointId, out var primaryId)
-            ? primaryId
-            : endpointId;
-
-        var selected = Ports.FirstOrDefault(port => string.Equals(port.Id, resolvedEndpointId, StringComparison.OrdinalIgnoreCase));
-        if (selected is not null)
-        {
-            SelectedPort = selected;
-        }
-    }
-
     private string BuildRouteSummary(string sourceEndpointId, string targetEndpointId, bool enabled)
     {
         var sourceName = ResolveEndpointName(sourceEndpointId);
@@ -1282,10 +1409,7 @@ public partial class RoutingViewModel : ObservableObject
             var formatted = row.IsUserManaged
                 ? FormatByteRate(GetBytesPerSecondForPortRow(row.Id, bytesPerSecondByEndpointId))
                 : "-";
-            if (!string.Equals(row.SentData, formatted, StringComparison.Ordinal))
-            {
-                rows[i] = row with { SentData = formatted };
-            }
+            row.UpdateSentData(formatted);
         }
     }
 
@@ -1451,12 +1575,46 @@ public partial class RoutingViewModel : ObservableObject
         _ = dispatcher.InvokeAsync(action);
     }
 
-    public sealed record PortRow(
-        string Id,
-        string Name,
-        string Direction,
-        string SentData,
-        bool IsUserManaged);
+    public sealed class PortRow : ObservableObject
+    {
+        private string _sentData;
+
+        public PortRow(
+            string id,
+            string name,
+            string direction,
+            string sentData,
+            bool isUserManaged)
+        {
+            Id = id;
+            Name = name;
+            Direction = direction;
+            _sentData = sentData;
+            IsUserManaged = isUserManaged;
+        }
+
+        public string Id { get; }
+
+        public string Name { get; }
+
+        public string Direction { get; }
+
+        public string SentData
+        {
+            get => _sentData;
+            private set => SetProperty(ref _sentData, value);
+        }
+
+        public bool IsUserManaged { get; }
+
+        public void UpdateSentData(string value)
+        {
+            if (!string.Equals(_sentData, value, StringComparison.Ordinal))
+            {
+                SentData = value;
+            }
+        }
+    }
 
     public sealed record RouteEndpointRow(
         string Id,

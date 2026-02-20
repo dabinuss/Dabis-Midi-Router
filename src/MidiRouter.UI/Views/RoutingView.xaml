@@ -127,7 +127,7 @@
                           CanUserAddRows="False"
                           IsReadOnly="True"
                           ItemsSource="{Binding AppPorts}"
-                          SelectedItem="{Binding SelectedPort, Mode=TwoWay}"
+                          SelectedItem="{Binding SelectedAppPort, Mode=TwoWay}"
                           ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
@@ -142,7 +142,7 @@
                           CanUserAddRows="False"
                           IsReadOnly="True"
                           ItemsSource="{Binding SystemPorts}"
-                          SelectedItem="{Binding SelectedPort, Mode=TwoWay}"
+                          SelectedItem="{Binding SelectedSystemPort, Mode=TwoWay}"
                           ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
