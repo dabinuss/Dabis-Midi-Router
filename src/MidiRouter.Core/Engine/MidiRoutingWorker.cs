@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using MidiRouter.Core.Monitoring;
 using MidiRouter.Core.Routing;
@@ -17,7 +18,9 @@ public sealed class MidiRoutingWorker(
     private Task? _workerTask;
     private bool _isStarted;
     private bool _routeEventsSubscribed;
+    private bool _endpointEventsSubscribed;
     private volatile RouteIndex _routeIndex = RouteIndex.Empty;
+    private readonly ConcurrentDictionary<string, string> _endpointNameCache = new(StringComparer.OrdinalIgnoreCase);
 
     public event EventHandler<RouteForwardedEventArgs>? RouteForwarded;
 
@@ -45,7 +48,14 @@ public sealed class MidiRoutingWorker(
                 _routeEventsSubscribed = true;
             }
 
+            if (!_endpointEventsSubscribed)
+            {
+                endpointCatalog.EndpointsChanged += OnEndpointsChanged;
+                _endpointEventsSubscribed = true;
+            }
+
             RebuildRouteIndex();
+            _endpointNameCache.Clear();
             midiSession.PacketReceived += OnPacketReceived;
             _workerTask = Task.Run(() => ProcessQueueAsync(_channel, _shutdown.Token));
         }
@@ -70,6 +80,12 @@ public sealed class MidiRoutingWorker(
             {
                 routeMatrix.RoutesChanged -= OnRoutesChanged;
                 _routeEventsSubscribed = false;
+            }
+
+            if (_endpointEventsSubscribed)
+            {
+                endpointCatalog.EndpointsChanged -= OnEndpointsChanged;
+                _endpointEventsSubscribed = false;
             }
 
             workerTask = _workerTask;
@@ -183,6 +199,11 @@ public sealed class MidiRoutingWorker(
 
     private string ResolveEndpointName(string endpointId)
     {
+        return _endpointNameCache.GetOrAdd(endpointId, ResolveEndpointNameUncached);
+    }
+
+    private string ResolveEndpointNameUncached(string endpointId)
+    {
         return endpointCatalog
             .GetEndpoints()
             .FirstOrDefault(endpoint => string.Equals(endpoint.Id, endpointId, StringComparison.OrdinalIgnoreCase))
@@ -226,6 +247,11 @@ public sealed class MidiRoutingWorker(
     private void OnRoutesChanged(object? sender, EventArgs args)
     {
         RebuildRouteIndex();
+    }
+
+    private void OnEndpointsChanged(object? sender, EventArgs args)
+    {
+        _endpointNameCache.Clear();
     }
 
     private void RebuildRouteIndex()

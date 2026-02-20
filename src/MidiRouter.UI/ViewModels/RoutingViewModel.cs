@@ -11,7 +11,7 @@ namespace MidiRouter.UI.ViewModels;
 
 public partial class RoutingViewModel : ObservableObject
 {
-    private const string PortOwnerAll = "Alle Eigentumer";
+    private const string PortOwnerAll = "Alle Eigentümer";
     private const string PortOwnerSystem = "System";
     private const string PortOwnerApp = "App";
     private const string PortDirectionAll = "Alle Richtungen";
@@ -95,7 +95,7 @@ public partial class RoutingViewModel : ObservableObject
     private string? _selectedRoutePortId;
 
     [ObservableProperty]
-    private string _selectedRouteSummary = "Keine Route ausgewahlt.";
+    private string _selectedRouteSummary = "Keine Route ausgewählt.";
 
     public RoutingViewModel(RouteMatrix routeMatrix, IMidiEndpointCatalog endpointCatalog, TrafficAnalyzer trafficAnalyzer)
     {
@@ -119,9 +119,6 @@ public partial class RoutingViewModel : ObservableObject
         };
         _portRefreshTimer.Tick += OnPortRefreshTimerTick;
 
-        UpdateEndpointSnapshot();
-        RefreshPorts();
-        RefreshRoutes();
     }
 
     public ObservableCollection<PortRow> Ports { get; } = [];
@@ -172,7 +169,7 @@ public partial class RoutingViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            ServiceHealthStatus = "Port-Service nicht verfugbar";
+            ServiceHealthStatus = "Port-Service nicht verfügbar";
             ValidationMessage = $"Port-Refresh fehlgeschlagen: {ex.Message}";
         }
     }
@@ -309,7 +306,7 @@ public partial class RoutingViewModel : ObservableObject
             var removed = await _endpointCatalog.DeleteLoopbackEndpointAsync(SelectedPort.Id);
             if (!removed)
             {
-                ValidationMessage = "Port konnte nicht geloscht werden.";
+                ValidationMessage = "Port konnte nicht gelöscht werden.";
                 return;
             }
 
@@ -333,11 +330,11 @@ public partial class RoutingViewModel : ObservableObject
             UpdateEndpointSnapshot();
             RefreshPorts();
             RefreshRoutes();
-            ValidationMessage = "Port wurde geloscht.";
+            ValidationMessage = "Port wurde gelöscht.";
         }
         catch (Exception ex)
         {
-            ValidationMessage = $"Port loschen fehlgeschlagen: {ex.Message}";
+            ValidationMessage = $"Port löschen fehlgeschlagen: {ex.Message}";
         }
     }
 
@@ -346,7 +343,7 @@ public partial class RoutingViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(SelectedSourceEndpointId) || string.IsNullOrWhiteSpace(SelectedTargetEndpointId))
         {
-            ValidationMessage = "Quelle und Ziel mussen ausgewahlt sein.";
+            ValidationMessage = "Quelle und Ziel müssen ausgewählt sein.";
             return;
         }
 
@@ -415,7 +412,7 @@ public partial class RoutingViewModel : ObservableObject
         RouteEnabled = true;
         RouteChannelsText = "alle";
         RouteTypesText = "alle";
-        SelectedRouteSummary = "Neue Route: ziehe einen Connector oder wahle Quelle/Ziel.";
+        SelectedRouteSummary = "Neue Route: ziehe einen Connector oder wähle Quelle/Ziel.";
 
         if (LeftRoutePorts.Count > 0)
         {
@@ -476,7 +473,7 @@ public partial class RoutingViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(endpointId))
         {
-            ValidationMessage = "Kein Port ausgewahlt.";
+            ValidationMessage = "Kein Port ausgewählt.";
             return false;
         }
 
@@ -501,7 +498,7 @@ public partial class RoutingViewModel : ObservableObject
 
         if (matchingRoutes.Count == 0)
         {
-            ValidationMessage = "Keine Verbindung fur diesen Port gefunden.";
+            ValidationMessage = "Keine Verbindung für diesen Port gefunden.";
             return false;
         }
 
@@ -509,7 +506,7 @@ public partial class RoutingViewModel : ObservableObject
         {
             var suggested = matchingRoutes.FirstOrDefault(route => route.Enabled) ?? matchingRoutes[0];
             SelectRoute(suggested.Id);
-            ValidationMessage = "Mehrere Verbindungen vorhanden. Bitte zuerst die gewunschte Linie anklicken und dann erneut loschen.";
+            ValidationMessage = "Mehrere Verbindungen vorhanden. Bitte zuerst die gewünschte Linie anklicken und dann erneut löschen.";
             return false;
         }
 
@@ -653,7 +650,7 @@ public partial class RoutingViewModel : ObservableObject
         }
         else if (!CanDeleteRoute())
         {
-            SelectedRouteSummary = "Keine Route ausgewahlt.";
+            SelectedRouteSummary = "Keine Route ausgewählt.";
         }
 
         DeleteRouteCommand.NotifyCanExecuteChanged();
@@ -853,12 +850,7 @@ public partial class RoutingViewModel : ObservableObject
 
         var selectedPortId = SelectedPort?.Id;
         var bytesPerSecondByEndpointId = _latestBytesPerSecondByEndpointId;
-
-        Ports.Clear();
-        AppPorts.Clear();
-        SystemPorts.Clear();
-        LeftRoutePorts.Clear();
-        RightRoutePorts.Clear();
+        var existingPortRowsById = Ports.ToDictionary(port => port.Id, StringComparer.OrdinalIgnoreCase);
 
         _portListPrimaryByEndpointId.Clear();
         _portListMemberIdsByPrimaryId.Clear();
@@ -873,6 +865,11 @@ public partial class RoutingViewModel : ObservableObject
         var leftRouteOrder = new List<string>();
         var rightRouteRows = new Dictionary<string, RouteEndpointAggregationState>(StringComparer.OrdinalIgnoreCase);
         var rightRouteOrder = new List<string>();
+        var desiredPorts = new List<PortRow>();
+        var desiredAppPorts = new List<PortRow>();
+        var desiredSystemPorts = new List<PortRow>();
+        var desiredLeftRoutePorts = new List<RouteEndpointRow>();
+        var desiredRightRoutePorts = new List<RouteEndpointRow>();
 
         foreach (var endpoint in filteredEndpoints)
         {
@@ -987,7 +984,7 @@ public partial class RoutingViewModel : ObservableObject
         {
             var aggregate = leftRouteRows[routeGroupKey];
             var routeStatus = aggregate.IsOnline ? "Online" : "Offline";
-            LeftRoutePorts.Add(new RouteEndpointRow(
+            desiredLeftRoutePorts.Add(new RouteEndpointRow(
                 aggregate.PrimaryId,
                 aggregate.Name,
                 GetDirection(aggregate.SupportsInput, aggregate.SupportsOutput),
@@ -1000,7 +997,7 @@ public partial class RoutingViewModel : ObservableObject
         {
             var aggregate = rightRouteRows[routeGroupKey];
             var routeStatus = aggregate.IsOnline ? "Online" : "Offline";
-            RightRoutePorts.Add(new RouteEndpointRow(
+            desiredRightRoutePorts.Add(new RouteEndpointRow(
                 aggregate.PrimaryId,
                 aggregate.Name,
                 GetDirection(aggregate.SupportsInput, aggregate.SupportsOutput),
@@ -1012,22 +1009,63 @@ public partial class RoutingViewModel : ObservableObject
         foreach (var groupKey in portOrder)
         {
             var aggregate = portRows[groupKey];
-            var row = new PortRow(
-                aggregate.PrimaryId,
-                aggregate.Name,
-                GetDirection(aggregate.SupportsInput, aggregate.SupportsOutput),
-                aggregate.IsUserManaged ? FormatByteRate(aggregate.BytesPerSecond) : "-",
-                aggregate.IsUserManaged);
-
-            Ports.Add(row);
-            if (row.IsUserManaged)
+            var direction = GetDirection(aggregate.SupportsInput, aggregate.SupportsOutput);
+            var sentData = aggregate.IsUserManaged ? FormatByteRate(aggregate.BytesPerSecond) : "-";
+            PortRow row;
+            if (existingPortRowsById.TryGetValue(aggregate.PrimaryId, out var existingRow) &&
+                string.Equals(existingRow.Name, aggregate.Name, StringComparison.Ordinal) &&
+                string.Equals(existingRow.Direction, direction, StringComparison.Ordinal) &&
+                existingRow.IsUserManaged == aggregate.IsUserManaged)
             {
-                AppPorts.Add(row);
+                existingRow.UpdateSentData(sentData);
+                row = existingRow;
             }
             else
             {
-                SystemPorts.Add(row);
+                row = new PortRow(
+                    aggregate.PrimaryId,
+                    aggregate.Name,
+                    direction,
+                    sentData,
+                    aggregate.IsUserManaged);
             }
+
+            desiredPorts.Add(row);
+            if (row.IsUserManaged)
+            {
+                desiredAppPorts.Add(row);
+            }
+            else
+            {
+                desiredSystemPorts.Add(row);
+            }
+        }
+
+        static bool MatchesPortRow(PortRow left, PortRow right) =>
+            string.Equals(left.Id, right.Id, StringComparison.OrdinalIgnoreCase);
+        static bool MatchesRouteEndpointRow(RouteEndpointRow left, RouteEndpointRow right) =>
+            string.Equals(left.Id, right.Id, StringComparison.OrdinalIgnoreCase);
+
+        SyncCollection(Ports, desiredPorts, MatchesPortRow);
+        SyncCollection(AppPorts, desiredAppPorts, MatchesPortRow);
+        SyncCollection(SystemPorts, desiredSystemPorts, MatchesPortRow);
+
+        if (HasNoMatchingItems(LeftRoutePorts, desiredLeftRoutePorts, MatchesRouteEndpointRow))
+        {
+            ReplaceCollection(LeftRoutePorts, desiredLeftRoutePorts);
+        }
+        else
+        {
+            SyncCollection(LeftRoutePorts, desiredLeftRoutePorts, MatchesRouteEndpointRow);
+        }
+
+        if (HasNoMatchingItems(RightRoutePorts, desiredRightRoutePorts, MatchesRouteEndpointRow))
+        {
+            ReplaceCollection(RightRoutePorts, desiredRightRoutePorts);
+        }
+        else
+        {
+            SyncCollection(RightRoutePorts, desiredRightRoutePorts, MatchesRouteEndpointRow);
         }
 
         var mappedSelectedPortId = selectedPortId is null
@@ -1076,6 +1114,91 @@ public partial class RoutingViewModel : ObservableObject
         }
 
         SaveRouteCommand.NotifyCanExecuteChanged();
+    }
+
+    private static void SyncCollection<T>(ObservableCollection<T> target, IList<T> desired, Func<T, T, bool> matches)
+    {
+        for (var i = target.Count - 1; i >= 0; i--)
+        {
+            if (!desired.Any(candidate => matches(target[i], candidate)))
+            {
+                target.RemoveAt(i);
+            }
+        }
+
+        for (var desiredIndex = 0; desiredIndex < desired.Count; desiredIndex++)
+        {
+            var desiredItem = desired[desiredIndex];
+
+            if (desiredIndex < target.Count && matches(target[desiredIndex], desiredItem))
+            {
+                if (!EqualityComparer<T>.Default.Equals(target[desiredIndex], desiredItem))
+                {
+                    target[desiredIndex] = desiredItem;
+                }
+
+                continue;
+            }
+
+            var existingIndex = IndexOfMatch(target, desiredItem, matches, desiredIndex + 1);
+            if (existingIndex >= 0)
+            {
+                if (!EqualityComparer<T>.Default.Equals(target[existingIndex], desiredItem))
+                {
+                    target[existingIndex] = desiredItem;
+                }
+
+                target.Move(existingIndex, desiredIndex);
+                continue;
+            }
+
+            target.Insert(desiredIndex, desiredItem);
+        }
+
+        while (target.Count > desired.Count)
+        {
+            target.RemoveAt(target.Count - 1);
+        }
+    }
+
+    private static bool HasNoMatchingItems<T>(IList<T> current, IList<T> desired, Func<T, T, bool> matches)
+    {
+        if (current.Count == 0 || desired.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var currentItem in current)
+        {
+            if (desired.Any(desiredItem => matches(currentItem, desiredItem)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static int IndexOfMatch<T>(IList<T> items, T desiredItem, Func<T, T, bool> matches, int startIndex)
+    {
+        for (var i = startIndex; i < items.Count; i++)
+        {
+            if (matches(items[i], desiredItem))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static void ReplaceCollection<T>(ObservableCollection<T> target, IList<T> desired)
+    {
+        target.Clear();
+        foreach (var item in desired)
+        {
+            target.Add(item);
+        }
     }
 
     private bool ShouldIncludeEndpointInUi(MidiEndpointDescriptor endpoint)
@@ -1181,7 +1304,7 @@ public partial class RoutingViewModel : ObservableObject
         else if (Routes.Count == 0)
         {
             SelectedRouteId = null;
-            SelectedRouteSummary = "Keine Route ausgewahlt.";
+            SelectedRouteSummary = "Keine Route ausgewählt.";
         }
 
         DeleteRouteCommand.NotifyCanExecuteChanged();
@@ -1193,13 +1316,13 @@ public partial class RoutingViewModel : ObservableObject
 
         if (string.IsNullOrWhiteSpace(sourceEndpointId) || string.IsNullOrWhiteSpace(targetEndpointId))
         {
-            error = "Quelle und Ziel mussen gesetzt sein.";
+            error = "Quelle und Ziel müssen gesetzt sein.";
             return false;
         }
 
         if (string.Equals(sourceEndpointId, targetEndpointId, StringComparison.OrdinalIgnoreCase))
         {
-            error = "Quelle und Ziel durfen nicht identisch sein.";
+            error = "Quelle und Ziel dürfen nicht identisch sein.";
             return false;
         }
 
@@ -1209,13 +1332,13 @@ public partial class RoutingViewModel : ObservableObject
 
         if (source is null || !source.SupportsInput)
         {
-            error = "Die gewahlte Quelle unterstutzt keinen Input.";
+            error = "Die gewählte Quelle unterstützt keinen Input.";
             return false;
         }
 
         if (target is null || !target.SupportsOutput)
         {
-            error = "Das gewahlte Ziel unterstutzt keinen Output.";
+            error = "Das gewählte Ziel unterstützt keinen Output.";
             return false;
         }
 
@@ -1468,6 +1591,7 @@ public partial class RoutingViewModel : ObservableObject
 
         if (selected is not null && !ReferenceEquals(SelectedPort, selected))
         {
+            // Setting SelectedPort triggers PropertyChanged and keeps dependent selection state in sync.
             SelectedPort = selected;
         }
     }
@@ -1512,7 +1636,7 @@ public partial class RoutingViewModel : ObservableObject
         {
             if (!int.TryParse(token, out var channel) || channel is < 1 or > 16)
             {
-                throw new FormatException("Kanaele mussen zwischen 1 und 16 liegen.");
+                throw new FormatException("Kanäle müssen zwischen 1 und 16 liegen.");
             }
 
             channels.Add(channel);

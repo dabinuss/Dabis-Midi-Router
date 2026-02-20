@@ -2,6 +2,10 @@ namespace MidiRouter.Core.Config;
 
 public sealed class AppConfig
 {
+    public const int CurrentSchemaVersion = 1;
+
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
+
     public string ActiveProfileName { get; set; } = "Default";
 
     public int LogBufferSize { get; set; } = 5000;

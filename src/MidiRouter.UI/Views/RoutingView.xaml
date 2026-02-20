@@ -75,7 +75,7 @@
                             Command="{Binding RenamePortCommand}"
                             MinWidth="135"
                             Margin="0,0,8,0" />
-                    <Button Content="Port loschen"
+                    <Button Content="Port löschen"
                             Command="{Binding DeletePortCommand}"
                             MinWidth="120" />
                 </StackPanel>
@@ -89,7 +89,7 @@
                                Margin="0,0,8,0" />
                     <TextBox Width="220"
                              Margin="0,0,8,0"
-                             ToolTip="Suche in Name, ID, Typ, Eigentumer, Richtung"
+                             ToolTip="Suche in Name, ID, Typ, Eigentümer, Richtung"
                              Text="{Binding PortSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
                     <ComboBox Width="160"
                               ItemsSource="{Binding PortDirectionFilters}"
@@ -259,7 +259,7 @@
                                                     Margin="6,0,0,0"
                                                     Content="x"
                                                     Cursor="Hand"
-                                                    ToolTip="Verbindung loschen"
+                                                    ToolTip="Verbindung löschen"
                                                     Click="OnDeletePortRouteClick" />
                                         </Grid>
                                     </Border>
@@ -343,7 +343,7 @@
                                                     Margin="0,0,8,0"
                                                     Content="x"
                                                     Cursor="Hand"
-                                                    ToolTip="Verbindung loschen"
+                                                    ToolTip="Verbindung löschen"
                                                     Click="OnDeletePortRouteClick" />
 
                                             <StackPanel Grid.Column="2">

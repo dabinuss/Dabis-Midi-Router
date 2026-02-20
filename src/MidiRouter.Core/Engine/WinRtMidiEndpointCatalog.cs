@@ -1,5 +1,6 @@
 #if WINDOWS
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Windows.Devices.Midi2;
 using Microsoft.Windows.Devices.Midi2.Endpoints.Loopback;
@@ -20,6 +21,7 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         WriteIndented = true
     };
 
+    // _syncRoot and _watcherRefreshSync are intentionally separate and never nested.
     private readonly object _syncRoot = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly Dictionary<string, HardwareEndpointState> _hardwareEndpoints = new(StringComparer.OrdinalIgnoreCase);
@@ -32,7 +34,10 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     private volatile bool _midiServicesEnabled;
     private string _midiServicesStatus = "Windows MIDI Services Runtime nicht initialisiert.";
     private Task? _midiServicesInitializationTask;
-    private int _midiServicesInitializationState;
+    private const int MidiServicesInitializationNotStarted = 0;
+    private const int MidiServicesInitializationStarting = 1;
+    private const int MidiServicesInitializationDone = 2;
+    private volatile int _midiServicesInitializationState; // 0=NotStarted, 1=Starting, 2=Done
 
     private DeviceWatcher? _inputWatcher;
     private DeviceWatcher? _outputWatcher;
@@ -226,8 +231,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                     return false;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine(ex.ToString());
                 return false;
             }
         }
@@ -375,12 +381,12 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 
     private void OnInputRemoved(DeviceWatcher sender, DeviceInformationUpdate info)
     {
-        RemoveHardwareDirection(info.Id, SupportsInput: true);
+        RemoveHardwareDirection(info.Id, supportsInputSide: true);
     }
 
     private void OnOutputRemoved(DeviceWatcher sender, DeviceInformationUpdate info)
     {
-        RemoveHardwareDirection(info.Id, SupportsInput: false);
+        RemoveHardwareDirection(info.Id, supportsInputSide: false);
     }
 
     private void OnWatcherUpdated(DeviceWatcher sender, DeviceInformationUpdate info)
@@ -410,11 +416,13 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                 await Task.Delay(150, nextCts.Token).ConfigureAwait(false);
                 await RefreshAsync(nextCts.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException ex)
             {
+                Debug.WriteLine(ex.ToString());
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine(ex.ToString());
             }
             finally
             {
@@ -456,7 +464,7 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         EndpointsChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void RemoveHardwareDirection(string endpointId, bool SupportsInput)
+    private void RemoveHardwareDirection(string endpointId, bool supportsInputSide)
     {
         lock (_syncRoot)
         {
@@ -467,8 +475,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 
             var updated = existing with
             {
-                SupportsInput = SupportsInput ? false : existing.SupportsInput,
-                SupportsOutput = SupportsInput ? existing.SupportsOutput : false,
+                // The watcher callbacks indicate which side disappeared, so we only clear that side.
+                SupportsInput = supportsInputSide ? false : existing.SupportsInput,
+                SupportsOutput = supportsInputSide ? existing.SupportsOutput : false,
                 IsOnline = true
             };
 
@@ -508,7 +517,10 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 
     private void EnsureMidiServicesInitializationStarted()
     {
-        if (Interlocked.CompareExchange(ref _midiServicesInitializationState, 1, comparand: 0) != 0)
+        if (Interlocked.CompareExchange(
+                ref _midiServicesInitializationState,
+                MidiServicesInitializationStarting,
+                comparand: MidiServicesInitializationNotStarted) != 0)
         {
             return;
         }
@@ -520,15 +532,16 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 
         _ = _midiServicesInitializationTask.ContinueWith(_ =>
         {
-            Interlocked.Exchange(ref _midiServicesInitializationState, 2);
+            Interlocked.Exchange(ref _midiServicesInitializationState, MidiServicesInitializationDone);
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await RefreshAsync().ConfigureAwait(false);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Debug.WriteLine(ex.ToString());
                 }
             });
         }, TaskScheduler.Default);
@@ -624,7 +637,7 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         }
     }
 
-    private async Task RefreshManagedLoopbackPortMappingsAsync(CancellationToken cancellationToken)
+    private Task RefreshManagedLoopbackPortMappingsAsync(CancellationToken cancellationToken)
     {
         List<ManagedLoopbackEndpointState> snapshot;
         lock (_syncRoot)
@@ -664,10 +677,10 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             PersistLoopbackDefinitions();
         }
 
-        await Task.CompletedTask;
+        return Task.CompletedTask;
     }
 
-    private async Task CreateRuntimeLoopbackPairAsync(ManagedLoopbackEndpointState loopback, CancellationToken cancellationToken)
+    private Task CreateRuntimeLoopbackPairAsync(ManagedLoopbackEndpointState loopback, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -698,7 +711,7 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
         loopback.EndpointDeviceIdA = creationResult.EndpointDeviceIdA;
         loopback.EndpointDeviceIdB = creationResult.EndpointDeviceIdB;
 
-        await Task.CompletedTask;
+        return Task.CompletedTask;
     }
 
     private async Task ResolveManagedPortIdsWithRetryAsync(ManagedLoopbackEndpointState loopback, CancellationToken cancellationToken)
@@ -743,8 +756,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             AddAssociatedPortIds(endpoint.FindAllAssociatedMidi1PortsForThisEndpoint(Midi1PortFlow.MidiMessageSource), resolved);
             AddAssociatedPortIds(endpoint.FindAllAssociatedMidi1PortsForThisEndpoint(Midi1PortFlow.MidiMessageDestination), resolved);
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine(ex.ToString());
         }
 
         return resolved;
@@ -775,8 +789,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             var response = MidiServiceConfig.UpdateTransportPluginConfig(updateConfig);
             return response.Status == MidiServiceConfigResponseStatus.Success;
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine(ex.ToString());
             return false;
         }
     }
@@ -987,8 +1002,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 
             PersistLoopbackDefinitions();
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine(ex.ToString());
         }
     }
 
@@ -1087,8 +1103,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine(ex.ToString());
         }
 
         return null;

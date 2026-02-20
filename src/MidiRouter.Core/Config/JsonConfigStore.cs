@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace MidiRouter.Core.Config;
@@ -27,7 +28,14 @@ public sealed class JsonConfigStore(ConfigStoreOptions options) : IConfigStore
             var config = await JsonSerializer.DeserializeAsync<AppConfig>(stream, SerializerOptions, cancellationToken)
                 .ConfigureAwait(false);
 
-            return config ?? new AppConfig();
+            var resolvedConfig = config ?? new AppConfig();
+            if (resolvedConfig.SchemaVersion != AppConfig.CurrentSchemaVersion)
+            {
+                Debug.WriteLine(
+                    $"Config schema version {resolvedConfig.SchemaVersion} differs from supported version {AppConfig.CurrentSchemaVersion}. Migration is not implemented yet.");
+            }
+
+            return resolvedConfig;
         }
         catch (JsonException)
         {
