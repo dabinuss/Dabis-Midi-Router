@@ -1,5 +1,6 @@
 #if WINDOWS
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using MidiRouter.Core.Routing;
 using NAudio.Midi;
 using Windows.Devices.Midi;
@@ -10,6 +11,8 @@ namespace MidiRouter.Core.Engine;
 
 public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMidiSession
 {
+    private static readonly TimeSpan AutoReconnectInterval = TimeSpan.FromSeconds(3);
+
     private readonly object _syncRoot = new();
     private readonly SemaphoreSlim _reconcileLock = new(1, 1);
     private readonly ConcurrentDictionary<string, MidiInPort> _inputPorts = new(StringComparer.OrdinalIgnoreCase);
@@ -20,6 +23,8 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
     private volatile bool _isStarted;
     private int _reconcileScheduled;
     private CancellationTokenSource? _reconcileDebounceCts;
+    private CancellationTokenSource? _autoReconnectCts;
+    private Task? _autoReconnectTask;
 
     public event EventHandler<MidiPacketReceivedEventArgs>? PacketReceived;
 
@@ -42,12 +47,16 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
 
             endpointCatalog.EndpointsChanged += OnEndpointsChanged;
             _isStarted = true;
+            StartAutoReconnectLoop();
 
             await ReconcilePortsAsync(cancellationToken).ConfigureAwait(false);
             SetState(MidiSessionState.Running);
         }
         catch (Exception ex)
         {
+            endpointCatalog.EndpointsChanged -= OnEndpointsChanged;
+            _isStarted = false;
+            await StopAutoReconnectLoopAsync(CancellationToken.None).ConfigureAwait(false);
             SetState(MidiSessionState.Faulted, ex.Message);
             throw;
         }
@@ -71,6 +80,7 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
             _reconcileDebounceCts?.Dispose();
             _reconcileDebounceCts = null;
         }
+        await StopAutoReconnectLoopAsync(cancellationToken).ConfigureAwait(false);
 
         await _reconcileLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -119,7 +129,16 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
 
         if (_winMmOutputs.TryGetValue(endpointId, out var winMmOut))
         {
-            SendViaWinMm(winMmOut, packet.Data);
+            try
+            {
+                SendViaWinMm(winMmOut, packet.Data);
+            }
+            catch (Exception ex) when (IsRecoverableSendException(ex))
+            {
+                RemoveFailedWinMmOutput(endpointId, winMmOut);
+                ScheduleReconcile(debounceMilliseconds: 0);
+            }
+
             return Task.CompletedTask;
         }
 
@@ -135,8 +154,10 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
             var buffer = writer.DetachBuffer();
             outPort.SendBuffer(buffer);
         }
-        catch (ObjectDisposedException)
+        catch (Exception ex) when (IsRecoverableSendException(ex))
         {
+            RemoveFailedOutputPort(endpointId, outPort);
+            ScheduleReconcile(debounceMilliseconds: 0);
         }
 
         return Task.CompletedTask;
@@ -149,6 +170,11 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
     }
 
     private void OnEndpointsChanged(object? sender, EventArgs args)
+    {
+        ScheduleReconcile(debounceMilliseconds: 120);
+    }
+
+    private void ScheduleReconcile(int debounceMilliseconds)
     {
         if (!_isStarted)
         {
@@ -168,7 +194,14 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
         {
             try
             {
-                await Task.Delay(120, debounceCts.Token).ConfigureAwait(false);
+                if (debounceMilliseconds > 0)
+                {
+                    await Task.Delay(debounceMilliseconds, debounceCts.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    debounceCts.Token.ThrowIfCancellationRequested();
+                }
             }
             catch (OperationCanceledException)
             {
@@ -207,6 +240,88 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
                 Interlocked.Exchange(ref _reconcileScheduled, 0);
             }
         }, CancellationToken.None);
+    }
+
+    private void StartAutoReconnectLoop()
+    {
+        CancellationToken token;
+        lock (_syncRoot)
+        {
+            _autoReconnectCts?.Cancel();
+            _autoReconnectCts?.Dispose();
+            _autoReconnectCts = new CancellationTokenSource();
+            token = _autoReconnectCts.Token;
+        }
+
+        _autoReconnectTask = Task.Run(() => RunAutoReconnectLoopAsync(token), CancellationToken.None);
+    }
+
+    private async Task StopAutoReconnectLoopAsync(CancellationToken cancellationToken)
+    {
+        Task? autoReconnectTask;
+        CancellationTokenSource? autoReconnectCts;
+
+        lock (_syncRoot)
+        {
+            autoReconnectTask = _autoReconnectTask;
+            autoReconnectCts = _autoReconnectCts;
+            _autoReconnectTask = null;
+            _autoReconnectCts = null;
+        }
+
+        if (autoReconnectCts is not null)
+        {
+            autoReconnectCts.Cancel();
+        }
+
+        if (autoReconnectTask is not null)
+        {
+            try
+            {
+                await autoReconnectTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        autoReconnectCts?.Dispose();
+    }
+
+    private async Task RunAutoReconnectLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(AutoReconnectInterval, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (!_isStarted)
+            {
+                return;
+            }
+
+            try
+            {
+                await endpointCatalog.RefreshAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch
+            {
+                ScheduleReconcile(debounceMilliseconds: 0);
+                continue;
+            }
+
+            ScheduleReconcile(debounceMilliseconds: 0);
+        }
     }
 
     private async Task ReconcilePortsAsync(CancellationToken cancellationToken)
@@ -477,6 +592,25 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
 
     private static bool IsWinMmOutputId(string endpointId) =>
         endpointId.StartsWith("winmm-out:", StringComparison.OrdinalIgnoreCase);
+
+    private void RemoveFailedOutputPort(string endpointId, IMidiOutPort outPort)
+    {
+        if (_outputPorts.TryRemove(new KeyValuePair<string, IMidiOutPort>(endpointId, outPort)))
+        {
+            outPort.Dispose();
+        }
+    }
+
+    private void RemoveFailedWinMmOutput(string endpointId, MidiOut midiOut)
+    {
+        if (_winMmOutputs.TryRemove(new KeyValuePair<string, MidiOut>(endpointId, midiOut)))
+        {
+            midiOut.Dispose();
+        }
+    }
+
+    private static bool IsRecoverableSendException(Exception exception) =>
+        exception is ObjectDisposedException or InvalidOperationException or COMException;
 
     private static byte[] CopyBuffer(IBuffer buffer)
     {

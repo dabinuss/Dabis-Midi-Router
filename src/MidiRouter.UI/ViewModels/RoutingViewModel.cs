@@ -1252,11 +1252,13 @@ public partial class RoutingViewModel : ObservableObject
 
     private void RefreshTrafficColumns()
     {
+        var selectedPortId = SelectedPort?.Id;
         var bytesPerSecondByEndpointId = _latestBytesPerSecondByEndpointId;
 
         RefreshTrafficColumn(Ports, bytesPerSecondByEndpointId);
         RefreshTrafficColumn(AppPorts, bytesPerSecondByEndpointId);
         RefreshTrafficColumn(SystemPorts, bytesPerSecondByEndpointId);
+        RestoreSelectedPortAfterTrafficRefresh(selectedPortId);
     }
 
     private void PollTrafficRatesAndRefreshColumns()
@@ -1323,6 +1325,27 @@ public partial class RoutingViewModel : ObservableObject
         }
 
         return $"{bytesPerSecond / (1024d * 1024d):0.00} MB/s";
+    }
+
+    private void RestoreSelectedPortAfterTrafficRefresh(string? selectedPortId)
+    {
+        if (string.IsNullOrWhiteSpace(selectedPortId))
+        {
+            return;
+        }
+
+        var mappedSelectedPortId = _portListPrimaryByEndpointId.TryGetValue(selectedPortId, out var primaryId)
+            ? primaryId
+            : selectedPortId;
+
+        var selected = AppPorts.FirstOrDefault(port => string.Equals(port.Id, mappedSelectedPortId, StringComparison.OrdinalIgnoreCase)) ??
+                       SystemPorts.FirstOrDefault(port => string.Equals(port.Id, mappedSelectedPortId, StringComparison.OrdinalIgnoreCase)) ??
+                       Ports.FirstOrDefault(port => string.Equals(port.Id, mappedSelectedPortId, StringComparison.OrdinalIgnoreCase));
+
+        if (selected is not null && !ReferenceEquals(SelectedPort, selected))
+        {
+            SelectedPort = selected;
+        }
     }
 
     private static string GetPortListDisplayName(MidiEndpointDescriptor endpoint, string displayName)
