@@ -19,7 +19,8 @@ public partial class RoutingView : UserControl
     private ScrollViewer? _leftScrollViewer;
     private ScrollViewer? _rightScrollViewer;
     private bool _syncingScroll;
-    private bool _renderScheduled;
+    private readonly DispatcherTimer _renderThrottleTimer;
+    private bool _renderRequested;
 
     private DragCandidate? _dragCandidate;
     private DragState? _dragState;
@@ -34,6 +35,12 @@ public partial class RoutingView : UserControl
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         LostMouseCapture += OnLostMouseCapture;
+
+        _renderThrottleTimer = new DispatcherTimer(DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(33)
+        };
+        _renderThrottleTimer.Tick += OnRenderThrottleTick;
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -57,6 +64,8 @@ public partial class RoutingView : UserControl
         ClearConnectorLookups();
         ClearPendingConnector();
         ClearDragState();
+        _renderRequested = false;
+        _renderThrottleTimer.Stop();
     }
 
     private void AttachToViewModel(RoutingViewModel? viewModel)
@@ -443,7 +452,6 @@ public partial class RoutingView : UserControl
         Mouse.OverrideCursor = Cursors.Hand;
         Mouse.Capture(this, CaptureMode.SubTree);
         UpdateDrag(pointerOnControl);
-        RenderRoutes();
     }
 
     private void UpdateDrag(Point pointerOnControl)
@@ -475,14 +483,7 @@ public partial class RoutingView : UserControl
                 ? GetEndpointEdgePoint(validTarget.EndpointId, validTarget.Side, validTarget.Element)
                 : TranslatePoint(pointerOnControl, RoutingCanvas);
 
-        if (IsLoaded)
-        {
-            RenderRoutes();
-        }
-        else
-        {
-            ScheduleRouteRender();
-        }
+        ScheduleRouteRender();
     }
 
     private void CompleteDrag(Point pointerOnControl)
@@ -616,17 +617,33 @@ public partial class RoutingView : UserControl
 
     private void ScheduleRouteRender()
     {
-        if (!IsLoaded || _renderScheduled)
+        if (!IsLoaded)
         {
             return;
         }
 
-        _renderScheduled = true;
-        _ = Dispatcher.InvokeAsync(() =>
+        _renderRequested = true;
+        if (!_renderThrottleTimer.IsEnabled)
         {
-            _renderScheduled = false;
-            RenderRoutes();
-        }, DispatcherPriority.Render);
+            _renderThrottleTimer.Start();
+        }
+    }
+
+    private void OnRenderThrottleTick(object? sender, EventArgs e)
+    {
+        if (!_renderRequested)
+        {
+            _renderThrottleTimer.Stop();
+            return;
+        }
+
+        _renderRequested = false;
+        RenderRoutes();
+
+        if (!_renderRequested)
+        {
+            _renderThrottleTimer.Stop();
+        }
     }
 
     private void RenderRoutes()
@@ -641,8 +658,11 @@ public partial class RoutingView : UserControl
 
         foreach (var route in _viewModel.GetRenderableRoutes())
         {
-            if (!TryGetPortAnchorPoint(route.SourceEndpointId, ConnectorSide.Left, out var start) ||
-                !TryGetPortAnchorPoint(route.TargetEndpointId, ConnectorSide.Right, out var end))
+            var sourceEndpointId = _viewModel.ResolveLeftRouteEndpointId(route.SourceEndpointId);
+            var targetEndpointId = _viewModel.ResolveRightRouteEndpointId(route.TargetEndpointId);
+
+            if (!TryGetPortAnchorPoint(sourceEndpointId, ConnectorSide.Left, out var start) ||
+                !TryGetPortAnchorPoint(targetEndpointId, ConnectorSide.Right, out var end))
             {
                 continue;
             }

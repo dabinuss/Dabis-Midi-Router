@@ -7,9 +7,9 @@ public sealed class InMemoryMidiEndpointCatalog : IMidiEndpointCatalog
     private readonly object _syncRoot = new();
     private readonly List<MidiEndpointDescriptor> _endpoints =
     [
-        new("hw:usb-keys", "USB Keys", MidiEndpointKind.Hardware, SupportsInput: true, SupportsOutput: true, IsUserManaged: false),
-        new("loop:1", "Loopback 1", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true, IsUserManaged: true),
-        new("loop:2", "Loopback 2", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true, IsUserManaged: true)
+        new("hw:usb-keys", "USB Keys", MidiEndpointKind.Hardware, SupportsInput: true, SupportsOutput: true, IsUserManaged: false, LogicalPortId: null),
+        new("loop:1", "Loopback 1", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true, IsUserManaged: true, LogicalPortId: "loop:1"),
+        new("loop:2", "Loopback 2", MidiEndpointKind.Loopback, SupportsInput: true, SupportsOutput: true, IsUserManaged: true, LogicalPortId: "loop:2")
     ];
 
     public event EventHandler? EndpointsChanged;
@@ -53,13 +53,15 @@ public sealed class InMemoryMidiEndpointCatalog : IMidiEndpointCatalog
             ? $"Loopback {DateTime.Now:HHmmss}"
             : name.Trim();
 
+        var endpointId = $"loop:{Guid.NewGuid():N}";
         var descriptor = new MidiEndpointDescriptor(
-            $"loop:{Guid.NewGuid():N}",
+            endpointId,
             safeName,
             MidiEndpointKind.Loopback,
             SupportsInput: true,
             SupportsOutput: true,
-            IsUserManaged: true);
+            IsUserManaged: true,
+            LogicalPortId: endpointId);
 
         lock (_syncRoot)
         {

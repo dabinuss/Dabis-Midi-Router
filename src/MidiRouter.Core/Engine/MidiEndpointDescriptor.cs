@@ -7,4 +7,5 @@ public sealed record MidiEndpointDescriptor(
     bool SupportsInput = true,
     bool SupportsOutput = true,
     bool IsOnline = true,
-    bool IsUserManaged = false);
+    bool IsUserManaged = false,
+    string? LogicalPortId = null);

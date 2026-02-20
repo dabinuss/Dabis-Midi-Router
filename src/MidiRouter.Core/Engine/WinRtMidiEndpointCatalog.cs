@@ -37,6 +37,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     private DeviceWatcher? _inputWatcher;
     private DeviceWatcher? _outputWatcher;
     private bool _watchersStarted;
+    private readonly object _watcherRefreshSync = new();
+    private CancellationTokenSource? _watcherRefreshCts;
 
     public WinRtMidiEndpointCatalog(ConfigStoreOptions options)
     {
@@ -64,6 +66,9 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                 .Select(pair =>
                 {
                     var isManaged = _managedPortAssociationByEndpointId.ContainsKey(pair.Key);
+                    var logicalPortId = _managedPortAssociationByEndpointId.TryGetValue(pair.Key, out var associationId)
+                        ? associationId.ToString("D")
+                        : null;
                     return new MidiEndpointDescriptor(
                         pair.Key,
                         pair.Value.Name,
@@ -71,7 +76,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                         pair.Value.SupportsInput,
                         pair.Value.SupportsOutput,
                         pair.Value.IsOnline,
-                        IsUserManaged: isManaged);
+                        IsUserManaged: isManaged,
+                        LogicalPortId: logicalPortId);
                 })
                 .OrderBy(endpoint => endpoint.Kind)
                 .ThenBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
@@ -95,8 +101,11 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
                 await RefreshManagedLoopbackPortMappingsAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            var inputDevices = await DeviceInformation.FindAllAsync(MidiInPort.GetDeviceSelector());
-            var outputDevices = await DeviceInformation.FindAllAsync(MidiOutPort.GetDeviceSelector());
+            var inputDevicesTask = DeviceInformation.FindAllAsync(MidiInPort.GetDeviceSelector());
+            var outputDevicesTask = DeviceInformation.FindAllAsync(MidiOutPort.GetDeviceSelector());
+
+            var inputDevices = await inputDevicesTask;
+            var outputDevices = await outputDevicesTask;
 
             var snapshot = new Dictionary<string, HardwareEndpointState>(StringComparer.OrdinalIgnoreCase);
 
@@ -181,7 +190,8 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
             SupportsInput: true,
             SupportsOutput: true,
             IsOnline: true,
-            IsUserManaged: true);
+            IsUserManaged: true,
+            LogicalPortId: loopback.AssociationId.ToString("D"));
     }
 
     public async Task<bool> DeleteLoopbackEndpointAsync(string endpointId, CancellationToken cancellationToken = default)
@@ -284,6 +294,13 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
     public void Dispose()
     {
         StopWatchers();
+        lock (_watcherRefreshSync)
+        {
+            _watcherRefreshCts?.Cancel();
+            _watcherRefreshCts?.Dispose();
+            _watcherRefreshCts = null;
+        }
+
         _midiInitializer?.Dispose();
         _midiInitializer = null;
         _refreshLock.Dispose();
@@ -368,16 +385,50 @@ public sealed class WinRtMidiEndpointCatalog : IMidiEndpointCatalog, IDisposable
 
     private void OnWatcherUpdated(DeviceWatcher sender, DeviceInformationUpdate info)
     {
+        ScheduleWatcherRefresh();
+    }
+
+    private void ScheduleWatcherRefresh()
+    {
+        CancellationTokenSource? previousCts;
+        CancellationTokenSource nextCts;
+
+        lock (_watcherRefreshSync)
+        {
+            previousCts = _watcherRefreshCts;
+            nextCts = new CancellationTokenSource();
+            _watcherRefreshCts = nextCts;
+        }
+
+        previousCts?.Cancel();
+        previousCts?.Dispose();
+
         _ = Task.Run(async () =>
         {
             try
             {
-                await RefreshAsync().ConfigureAwait(false);
+                await Task.Delay(150, nextCts.Token).ConfigureAwait(false);
+                await RefreshAsync(nextCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
             }
             catch
             {
             }
-        });
+            finally
+            {
+                lock (_watcherRefreshSync)
+                {
+                    if (ReferenceEquals(_watcherRefreshCts, nextCts))
+                    {
+                        _watcherRefreshCts = null;
+                    }
+                }
+
+                nextCts.Dispose();
+            }
+        }, CancellationToken.None);
     }
 
     private void ApplyHardwareEndpoint(string endpointId, string name, bool SupportsInput, bool SupportsOutput)

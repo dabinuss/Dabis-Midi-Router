@@ -19,6 +19,7 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
 
     private volatile bool _isStarted;
     private int _reconcileScheduled;
+    private CancellationTokenSource? _reconcileDebounceCts;
 
     public event EventHandler<MidiPacketReceivedEventArgs>? PacketReceived;
 
@@ -64,6 +65,12 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
         endpointCatalog.EndpointsChanged -= OnEndpointsChanged;
         _isStarted = false;
         Interlocked.Exchange(ref _reconcileScheduled, 0);
+        lock (_syncRoot)
+        {
+            _reconcileDebounceCts?.Cancel();
+            _reconcileDebounceCts?.Dispose();
+            _reconcileDebounceCts = null;
+        }
 
         await _reconcileLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -143,13 +150,36 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
 
     private void OnEndpointsChanged(object? sender, EventArgs args)
     {
-        if (Interlocked.Exchange(ref _reconcileScheduled, 1) == 1)
+        if (!_isStarted)
         {
             return;
         }
 
+        CancellationTokenSource debounceCts;
+        lock (_syncRoot)
+        {
+            _reconcileDebounceCts?.Cancel();
+            _reconcileDebounceCts?.Dispose();
+            _reconcileDebounceCts = new CancellationTokenSource();
+            debounceCts = _reconcileDebounceCts;
+        }
+
         _ = Task.Run(async () =>
         {
+            try
+            {
+                await Task.Delay(120, debounceCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _reconcileScheduled, 1) == 1)
+            {
+                return;
+            }
+
             try
             {
                 while (_isStarted)
@@ -176,7 +206,7 @@ public sealed class WinRtMidiSession(IMidiEndpointCatalog endpointCatalog) : IMi
             {
                 Interlocked.Exchange(ref _reconcileScheduled, 0);
             }
-        });
+        }, CancellationToken.None);
     }
 
     private async Task ReconcilePortsAsync(CancellationToken cancellationToken)

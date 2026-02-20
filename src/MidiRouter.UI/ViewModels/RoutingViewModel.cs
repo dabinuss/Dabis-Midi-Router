@@ -23,10 +23,17 @@ public partial class RoutingViewModel : ObservableObject
     private readonly IMidiEndpointCatalog _endpointCatalog;
     private readonly TrafficAnalyzer _trafficAnalyzer;
     private readonly DispatcherTimer _trafficRefreshTimer;
+    private readonly DispatcherTimer _portRefreshTimer;
     private readonly Dictionary<string, long> _createdPortPriority = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _portListPrimaryByEndpointId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _portListMemberIdsByPrimaryId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _leftRoutePrimaryByEndpointId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _rightRoutePrimaryByEndpointId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<string>> _leftRouteMemberIdsByPrimaryId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<string>> _rightRouteMemberIdsByPrimaryId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, double> _latestBytesPerSecondByEndpointId = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<MidiEndpointDescriptor> _cachedEndpoints = [];
+    private bool _refreshRoutesAfterPortRefresh;
     private long _createdPortCounter;
 
     [ObservableProperty]
@@ -90,11 +97,7 @@ public partial class RoutingViewModel : ObservableObject
         _trafficAnalyzer = trafficAnalyzer;
 
         _routeMatrix.RoutesChanged += (_, _) => RunOnUiThread(RefreshRoutes);
-        _endpointCatalog.EndpointsChanged += (_, _) => RunOnUiThread(() =>
-        {
-            RefreshPorts();
-            RefreshRoutes();
-        });
+        _endpointCatalog.EndpointsChanged += (_, _) => RunOnUiThread(HandleEndpointsChanged);
 
         _trafficRefreshTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -103,6 +106,13 @@ public partial class RoutingViewModel : ObservableObject
         _trafficRefreshTimer.Tick += (_, _) => PollTrafficRatesAndRefreshColumns();
         _trafficRefreshTimer.Start();
 
+        _portRefreshTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(120)
+        };
+        _portRefreshTimer.Tick += OnPortRefreshTimerTick;
+
+        UpdateEndpointSnapshot();
         RefreshPorts();
         RefreshRoutes();
     }
@@ -148,6 +158,7 @@ public partial class RoutingViewModel : ObservableObject
         {
             ValidationMessage = string.Empty;
             await _endpointCatalog.RefreshAsync();
+            UpdateEndpointSnapshot();
             RefreshPorts();
             RefreshRoutes();
             ServiceHealthStatus = $"Ports geladen: L {LeftRoutePorts.Count} / R {RightRoutePorts.Count}";
@@ -165,16 +176,15 @@ public partial class RoutingViewModel : ObservableObject
         try
         {
             ValidationMessage = string.Empty;
-            var knownManagedIds = _endpointCatalog
-                .GetEndpoints()
+            var knownManagedIds = GetCachedEndpoints()
                 .Where(endpoint => endpoint.IsUserManaged)
                 .Select(endpoint => endpoint.Id)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var created = await _endpointCatalog.CreateLoopbackEndpointAsync(NewPortName);
+            UpdateEndpointSnapshot();
 
-            var newlyCreatedManagedEndpoints = _endpointCatalog
-                .GetEndpoints()
+            var newlyCreatedManagedEndpoints = GetCachedEndpoints()
                 .Where(endpoint => endpoint.IsUserManaged && !knownManagedIds.Contains(endpoint.Id))
                 .OrderBy(endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -193,27 +203,53 @@ public partial class RoutingViewModel : ObservableObject
 
             RefreshPorts();
 
-            var selectedPortId = Ports.Any(port => string.Equals(port.Id, created.Id, StringComparison.OrdinalIgnoreCase))
-                ? created.Id
-                : newlyCreatedManagedEndpoints
-                    .Select(endpoint => endpoint.Id)
-                    .FirstOrDefault(id => Ports.Any(port => string.Equals(port.Id, id, StringComparison.OrdinalIgnoreCase)));
+            var candidateEndpointIds = newlyCreatedManagedEndpoints
+                .Select(endpoint => endpoint.Id)
+                .Prepend(created.Id)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var selectedPortId = candidateEndpointIds
+                .Select(endpointId =>
+                    _portListPrimaryByEndpointId.TryGetValue(endpointId, out var primaryId)
+                        ? primaryId
+                        : endpointId)
+                .FirstOrDefault(primaryId => Ports.Any(port => string.Equals(port.Id, primaryId, StringComparison.OrdinalIgnoreCase)));
 
             SelectedPort = selectedPortId is null
                 ? Ports.FirstOrDefault()
                 : Ports.FirstOrDefault(port => string.Equals(port.Id, selectedPortId, StringComparison.OrdinalIgnoreCase));
 
+            var selectedSourceEndpointId = candidateEndpointIds
+                .Select(MapRouteEndpointIdForSource)
+                .FirstOrDefault(endpointId =>
+                    LeftRoutePorts.Any(port => string.Equals(port.Id, endpointId, StringComparison.OrdinalIgnoreCase)));
+
+            var selectedTargetEndpointId = candidateEndpointIds
+                .Select(MapRouteEndpointIdForTarget)
+                .FirstOrDefault(endpointId =>
+                    RightRoutePorts.Any(port => string.Equals(port.Id, endpointId, StringComparison.OrdinalIgnoreCase)));
+
             if (created.SupportsInput)
             {
-                SelectedSourceEndpointId = selectedPortId ?? created.Id;
+                SelectedSourceEndpointId = selectedSourceEndpointId ?? LeftRoutePorts.FirstOrDefault()?.Id;
             }
 
             if (created.SupportsOutput)
             {
-                SelectedTargetEndpointId = selectedPortId ?? created.Id;
+                SelectedTargetEndpointId = selectedTargetEndpointId ?? RightRoutePorts.FirstOrDefault()?.Id;
             }
 
-            SelectRoutePort(selectedPortId ?? created.Id);
+            var selectedRouteEndpointId = selectedSourceEndpointId ??
+                                          selectedTargetEndpointId ??
+                                          candidateEndpointIds
+                                              .Select(NormalizeRoutePortSelectionId)
+                                              .FirstOrDefault(endpointId =>
+                                                  LeftRoutePorts.Any(port => string.Equals(port.Id, endpointId, StringComparison.OrdinalIgnoreCase)) ||
+                                                  RightRoutePorts.Any(port => string.Equals(port.Id, endpointId, StringComparison.OrdinalIgnoreCase))) ??
+                                          NormalizeRoutePortSelectionId(created.Id);
+
+            SelectRoutePort(selectedRouteEndpointId);
             EditPortFocusRequested?.Invoke(this, EventArgs.Empty);
             ValidationMessage = $"Interner Port '{created.Name}' erstellt.";
         }
@@ -241,6 +277,7 @@ public partial class RoutingViewModel : ObservableObject
                 return;
             }
 
+            UpdateEndpointSnapshot();
             RefreshPorts();
             RefreshRoutes();
             ValidationMessage = "Port wurde umbenannt.";
@@ -269,11 +306,15 @@ public partial class RoutingViewModel : ObservableObject
                 return;
             }
 
+            var routeEndpointIds = _portListMemberIdsByPrimaryId.TryGetValue(SelectedPort.Id, out var memberIds)
+                ? memberIds
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase) { SelectedPort.Id };
+
             var routesToRemove = _routeMatrix
                 .GetRoutes()
                 .Where(route =>
-                    string.Equals(route.SourceEndpointId, SelectedPort.Id, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(route.TargetEndpointId, SelectedPort.Id, StringComparison.OrdinalIgnoreCase))
+                    routeEndpointIds.Contains(route.SourceEndpointId) ||
+                    routeEndpointIds.Contains(route.TargetEndpointId))
                 .Select(route => route.Id)
                 .ToList();
 
@@ -282,6 +323,7 @@ public partial class RoutingViewModel : ObservableObject
                 _routeMatrix.RemoveRoute(routeId);
             }
 
+            UpdateEndpointSnapshot();
             RefreshPorts();
             RefreshRoutes();
             ValidationMessage = "Port wurde geloscht.";
@@ -394,8 +436,8 @@ public partial class RoutingViewModel : ObservableObject
         }
 
         SelectedRouteId = route.Id;
-        SelectedSourceEndpointId = route.SourceEndpointId;
-        SelectedTargetEndpointId = route.TargetEndpointId;
+        SelectedSourceEndpointId = MapRouteEndpointIdForSource(route.SourceEndpointId);
+        SelectedTargetEndpointId = MapRouteEndpointIdForTarget(route.TargetEndpointId);
         RouteEnabled = route.Enabled;
         RouteChannelsText = route.Filter.Channels.Count == 0 ? "alle" : string.Join(", ", route.Filter.Channels.OrderBy(channel => channel));
         RouteTypesText = route.Filter.MessageTypes.Count == 0 ? "alle" : string.Join(", ", route.Filter.MessageTypes.OrderBy(type => type.ToString()));
@@ -431,12 +473,13 @@ public partial class RoutingViewModel : ObservableObject
             return false;
         }
 
+        var candidateEndpointIds = ResolveEquivalentEndpointIds(endpointId);
         if (SelectedRouteId.HasValue)
         {
             var selectedRoute = _routeMatrix.GetRoutes().FirstOrDefault(route => route.Id == SelectedRouteId.Value);
             if (selectedRoute is not null &&
-                (string.Equals(selectedRoute.SourceEndpointId, endpointId, StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(selectedRoute.TargetEndpointId, endpointId, StringComparison.OrdinalIgnoreCase)))
+                (candidateEndpointIds.Contains(selectedRoute.SourceEndpointId) ||
+                 candidateEndpointIds.Contains(selectedRoute.TargetEndpointId)))
             {
                 DeleteRoute();
                 return true;
@@ -445,8 +488,8 @@ public partial class RoutingViewModel : ObservableObject
 
         var matchingRoutes = _routeMatrix.GetRoutes()
             .Where(route =>
-                string.Equals(route.SourceEndpointId, endpointId, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(route.TargetEndpointId, endpointId, StringComparison.OrdinalIgnoreCase))
+                candidateEndpointIds.Contains(route.SourceEndpointId) ||
+                candidateEndpointIds.Contains(route.TargetEndpointId))
             .ToList();
 
         if (matchingRoutes.Count == 0)
@@ -475,7 +518,7 @@ public partial class RoutingViewModel : ObservableObject
             return;
         }
 
-        SelectedRoutePortId = endpointId;
+        SelectedRoutePortId = NormalizeRoutePortSelectionId(endpointId);
     }
 
     public bool CanCreateRoute(string sourceEndpointId, string targetEndpointId, out string error)
@@ -512,10 +555,11 @@ public partial class RoutingViewModel : ObservableObject
             return Routes.ToList();
         }
 
+        var selectedRouteEndpointIds = ResolveEquivalentEndpointIds(SelectedRoutePortId);
         return Routes
             .Where(route =>
-                string.Equals(route.SourceEndpointId, SelectedRoutePortId, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(route.TargetEndpointId, SelectedRoutePortId, StringComparison.OrdinalIgnoreCase))
+                selectedRouteEndpointIds.Contains(route.SourceEndpointId) ||
+                selectedRouteEndpointIds.Contains(route.TargetEndpointId))
             .ToList();
     }
 
@@ -533,23 +577,22 @@ public partial class RoutingViewModel : ObservableObject
 
     partial void OnHideSystemPortsChanged(bool value)
     {
-        RefreshPorts();
-        RefreshRoutes();
+        SchedulePortRefresh(includeRoutes: true);
     }
 
     partial void OnPortSearchTextChanged(string value)
     {
-        RefreshPorts();
+        SchedulePortRefresh(includeRoutes: false);
     }
 
     partial void OnSelectedPortOwnerFilterChanged(string value)
     {
-        RefreshPorts();
+        SchedulePortRefresh(includeRoutes: false);
     }
 
     partial void OnSelectedPortDirectionFilterChanged(string value)
     {
-        RefreshPorts();
+        SchedulePortRefresh(includeRoutes: false);
     }
 
     partial void OnSelectedSourceEndpointIdChanged(string? value)
@@ -605,9 +648,52 @@ public partial class RoutingViewModel : ObservableObject
         return SelectedRouteId.HasValue;
     }
 
+    private void HandleEndpointsChanged()
+    {
+        UpdateEndpointSnapshot();
+        RefreshPorts();
+        RefreshRoutes();
+    }
+
+    private void OnPortRefreshTimerTick(object? sender, EventArgs e)
+    {
+        _portRefreshTimer.Stop();
+        RefreshPorts();
+
+        if (!_refreshRoutesAfterPortRefresh)
+        {
+            return;
+        }
+
+        _refreshRoutesAfterPortRefresh = false;
+        RefreshRoutes();
+    }
+
+    private void SchedulePortRefresh(bool includeRoutes)
+    {
+        _refreshRoutesAfterPortRefresh |= includeRoutes;
+        _portRefreshTimer.Stop();
+        _portRefreshTimer.Start();
+    }
+
+    private void UpdateEndpointSnapshot()
+    {
+        _cachedEndpoints = _endpointCatalog.GetEndpoints().ToList();
+    }
+
+    private IReadOnlyList<MidiEndpointDescriptor> GetCachedEndpoints()
+    {
+        if (_cachedEndpoints.Count == 0)
+        {
+            UpdateEndpointSnapshot();
+        }
+
+        return _cachedEndpoints;
+    }
+
     private void RefreshPorts()
     {
-        var allEndpoints = _endpointCatalog.GetEndpoints().ToList();
+        var allEndpoints = GetCachedEndpoints();
 
         var knownIds = allEndpoints
             .Select(endpoint => endpoint.Id)
@@ -636,17 +722,23 @@ public partial class RoutingViewModel : ObservableObject
 
         _portListPrimaryByEndpointId.Clear();
         _portListMemberIdsByPrimaryId.Clear();
+        _leftRoutePrimaryByEndpointId.Clear();
+        _rightRoutePrimaryByEndpointId.Clear();
+        _leftRouteMemberIdsByPrimaryId.Clear();
+        _rightRouteMemberIdsByPrimaryId.Clear();
 
         var portRows = new Dictionary<string, PortAggregationState>(StringComparer.OrdinalIgnoreCase);
         var portOrder = new List<string>();
+        var leftRouteRows = new Dictionary<string, RouteEndpointAggregationState>(StringComparer.OrdinalIgnoreCase);
+        var leftRouteOrder = new List<string>();
+        var rightRouteRows = new Dictionary<string, RouteEndpointAggregationState>(StringComparer.OrdinalIgnoreCase);
+        var rightRouteOrder = new List<string>();
 
         foreach (var endpoint in filteredEndpoints)
         {
             var displayName = FormatPortDisplayName(endpoint);
             var listDisplayName = GetPortListDisplayName(endpoint, displayName);
-            var direction = GetDirection(endpoint);
             var owner = endpoint.IsUserManaged ? PortOwnerApp : PortOwnerSystem;
-            var status = endpoint.IsOnline ? "Online" : "Offline";
             var type = endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System";
 
             var groupKey = BuildPortListGroupKey(endpoint, listDisplayName, type, owner);
@@ -684,25 +776,97 @@ public partial class RoutingViewModel : ObservableObject
 
             if (endpoint.SupportsInput)
             {
-                LeftRoutePorts.Add(new RouteEndpointRow(
-                    endpoint.Id,
-                    displayName,
-                    direction,
-                    owner,
-                    status,
-                    BuildEndpointMeta(endpoint)));
+                var routeGroupKey = BuildRouteVisualGroupKey(endpoint, listDisplayName);
+                if (!leftRouteRows.TryGetValue(routeGroupKey, out var leftAggregate))
+                {
+                    leftAggregate = new RouteEndpointAggregationState(
+                        endpoint.Id,
+                        listDisplayName,
+                        owner,
+                        endpoint.Kind == MidiEndpointKind.Loopback,
+                        endpoint.IsOnline,
+                        endpoint.SupportsInput,
+                        endpoint.SupportsOutput);
+                    leftRouteRows[routeGroupKey] = leftAggregate;
+                    leftRouteOrder.Add(routeGroupKey);
+                }
+                else
+                {
+                    leftAggregate.IsLoopback |= endpoint.Kind == MidiEndpointKind.Loopback;
+                    leftAggregate.IsOnline |= endpoint.IsOnline;
+                    leftAggregate.SupportsInput |= endpoint.SupportsInput;
+                    leftAggregate.SupportsOutput |= endpoint.SupportsOutput;
+                }
+
+                _leftRoutePrimaryByEndpointId[endpoint.Id] = leftAggregate.PrimaryId;
+                if (!_leftRouteMemberIdsByPrimaryId.TryGetValue(leftAggregate.PrimaryId, out var leftMemberIds))
+                {
+                    leftMemberIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _leftRouteMemberIdsByPrimaryId[leftAggregate.PrimaryId] = leftMemberIds;
+                }
+
+                leftMemberIds.Add(endpoint.Id);
             }
 
             if (endpoint.SupportsOutput)
             {
-                RightRoutePorts.Add(new RouteEndpointRow(
-                    endpoint.Id,
-                    displayName,
-                    direction,
-                    owner,
-                    status,
-                    BuildEndpointMeta(endpoint)));
+                var routeGroupKey = BuildRouteVisualGroupKey(endpoint, listDisplayName);
+                if (!rightRouteRows.TryGetValue(routeGroupKey, out var rightAggregate))
+                {
+                    rightAggregate = new RouteEndpointAggregationState(
+                        endpoint.Id,
+                        listDisplayName,
+                        owner,
+                        endpoint.Kind == MidiEndpointKind.Loopback,
+                        endpoint.IsOnline,
+                        endpoint.SupportsInput,
+                        endpoint.SupportsOutput);
+                    rightRouteRows[routeGroupKey] = rightAggregate;
+                    rightRouteOrder.Add(routeGroupKey);
+                }
+                else
+                {
+                    rightAggregate.IsLoopback |= endpoint.Kind == MidiEndpointKind.Loopback;
+                    rightAggregate.IsOnline |= endpoint.IsOnline;
+                    rightAggregate.SupportsInput |= endpoint.SupportsInput;
+                    rightAggregate.SupportsOutput |= endpoint.SupportsOutput;
+                }
+
+                _rightRoutePrimaryByEndpointId[endpoint.Id] = rightAggregate.PrimaryId;
+                if (!_rightRouteMemberIdsByPrimaryId.TryGetValue(rightAggregate.PrimaryId, out var rightMemberIds))
+                {
+                    rightMemberIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _rightRouteMemberIdsByPrimaryId[rightAggregate.PrimaryId] = rightMemberIds;
+                }
+
+                rightMemberIds.Add(endpoint.Id);
             }
+        }
+
+        foreach (var routeGroupKey in leftRouteOrder)
+        {
+            var aggregate = leftRouteRows[routeGroupKey];
+            var routeStatus = aggregate.IsOnline ? "Online" : "Offline";
+            LeftRoutePorts.Add(new RouteEndpointRow(
+                aggregate.PrimaryId,
+                aggregate.Name,
+                GetDirection(aggregate.SupportsInput, aggregate.SupportsOutput),
+                aggregate.Owner,
+                routeStatus,
+                BuildEndpointMeta(aggregate.IsLoopback, aggregate.IsOnline)));
+        }
+
+        foreach (var routeGroupKey in rightRouteOrder)
+        {
+            var aggregate = rightRouteRows[routeGroupKey];
+            var routeStatus = aggregate.IsOnline ? "Online" : "Offline";
+            RightRoutePorts.Add(new RouteEndpointRow(
+                aggregate.PrimaryId,
+                aggregate.Name,
+                GetDirection(aggregate.SupportsInput, aggregate.SupportsOutput),
+                aggregate.Owner,
+                routeStatus,
+                BuildEndpointMeta(aggregate.IsLoopback, aggregate.IsOnline)));
         }
 
         foreach (var groupKey in portOrder)
@@ -737,9 +901,19 @@ public partial class RoutingViewModel : ObservableObject
             : Ports.FirstOrDefault(port => string.Equals(port.Id, mappedSelectedPortId, StringComparison.OrdinalIgnoreCase))
               ?? Ports.FirstOrDefault();
 
+        if (!string.IsNullOrWhiteSpace(SelectedSourceEndpointId))
+        {
+            SelectedSourceEndpointId = MapRouteEndpointIdForSource(SelectedSourceEndpointId);
+        }
+
         if (SelectedSourceEndpointId is null || LeftRoutePorts.All(endpoint => endpoint.Id != SelectedSourceEndpointId))
         {
             SelectedSourceEndpointId = LeftRoutePorts.FirstOrDefault()?.Id;
+        }
+
+        if (!string.IsNullOrWhiteSpace(SelectedTargetEndpointId))
+        {
+            SelectedTargetEndpointId = MapRouteEndpointIdForTarget(SelectedTargetEndpointId);
         }
 
         if (SelectedTargetEndpointId is null || RightRoutePorts.All(endpoint => endpoint.Id != SelectedTargetEndpointId))
@@ -747,6 +921,11 @@ public partial class RoutingViewModel : ObservableObject
             var preferred = RightRoutePorts.FirstOrDefault(endpoint =>
                 !string.Equals(endpoint.Id, SelectedSourceEndpointId, StringComparison.OrdinalIgnoreCase));
             SelectedTargetEndpointId = preferred?.Id ?? RightRoutePorts.FirstOrDefault()?.Id;
+        }
+
+        if (!string.IsNullOrWhiteSpace(SelectedRoutePortId))
+        {
+            SelectedRoutePortId = NormalizeRoutePortSelectionId(SelectedRoutePortId);
         }
 
         if (SelectedRoutePortId is null ||
@@ -825,8 +1004,11 @@ public partial class RoutingViewModel : ObservableObject
 
     private void RefreshRoutes()
     {
-        var endpointLookup = _endpointCatalog.GetEndpoints()
-            .ToDictionary(endpoint => endpoint.Id, endpoint => endpoint.Name, StringComparer.OrdinalIgnoreCase);
+        var endpointLookup = GetCachedEndpoints()
+            .ToDictionary(
+                endpoint => endpoint.Id,
+                endpoint => GetPortListDisplayName(endpoint, FormatPortDisplayName(endpoint)),
+                StringComparer.OrdinalIgnoreCase);
 
         var selectedRouteId = SelectedRouteId;
         Routes.Clear();
@@ -881,7 +1063,7 @@ public partial class RoutingViewModel : ObservableObject
             return false;
         }
 
-        var endpoints = _endpointCatalog.GetEndpoints();
+        var endpoints = GetCachedEndpoints();
         var source = endpoints.FirstOrDefault(endpoint => string.Equals(endpoint.Id, sourceEndpointId, StringComparison.OrdinalIgnoreCase));
         var target = endpoints.FirstOrDefault(endpoint => string.Equals(endpoint.Id, targetEndpointId, StringComparison.OrdinalIgnoreCase));
 
@@ -937,15 +1119,23 @@ public partial class RoutingViewModel : ObservableObject
 
     private string ResolveEndpointName(string endpointId)
     {
-        return _endpointCatalog.GetEndpoints()
-            .FirstOrDefault(endpoint => string.Equals(endpoint.Id, endpointId, StringComparison.OrdinalIgnoreCase))
-            ?.Name ?? endpointId;
+        var endpoint = GetCachedEndpoints()
+            .FirstOrDefault(candidate => string.Equals(candidate.Id, endpointId, StringComparison.OrdinalIgnoreCase));
+
+        return endpoint is null
+            ? endpointId
+            : GetPortListDisplayName(endpoint, FormatPortDisplayName(endpoint));
     }
 
     private static string BuildEndpointMeta(MidiEndpointDescriptor endpoint)
     {
-        var type = endpoint.Kind == MidiEndpointKind.Loopback ? "Loopback" : "System";
-        var status = endpoint.IsOnline ? "Online" : "Offline";
+        return BuildEndpointMeta(endpoint.Kind == MidiEndpointKind.Loopback, endpoint.IsOnline);
+    }
+
+    private static string BuildEndpointMeta(bool isLoopback, bool isOnline)
+    {
+        var type = isLoopback ? "Loopback" : "System";
+        var status = isOnline ? "Online" : "Offline";
         return $"{type} | {status}";
     }
 
@@ -967,7 +1157,97 @@ public partial class RoutingViewModel : ObservableObject
 
     private static string BuildPortListGroupKey(MidiEndpointDescriptor endpoint, string displayName, string type, string owner)
     {
+        if (endpoint.IsUserManaged && !string.IsNullOrWhiteSpace(endpoint.LogicalPortId))
+        {
+            return $"managed|{endpoint.LogicalPortId}";
+        }
+
         return $"{(endpoint.IsUserManaged ? "managed" : "system")}|{type}|{owner}|{displayName}";
+    }
+
+    private static string BuildRouteVisualGroupKey(MidiEndpointDescriptor endpoint, string displayName)
+    {
+        if (endpoint.IsUserManaged && !string.IsNullOrWhiteSpace(endpoint.LogicalPortId))
+        {
+            return $"managed|{endpoint.LogicalPortId}";
+        }
+
+        return $"endpoint|{endpoint.Id}|{displayName}";
+    }
+
+    private string MapRouteEndpointIdForSource(string endpointId)
+    {
+        return MapRouteEndpointId(endpointId, _leftRoutePrimaryByEndpointId);
+    }
+
+    private string MapRouteEndpointIdForTarget(string endpointId)
+    {
+        return MapRouteEndpointId(endpointId, _rightRoutePrimaryByEndpointId);
+    }
+
+    private static string MapRouteEndpointId(string endpointId, IReadOnlyDictionary<string, string> primaryByEndpointId)
+    {
+        if (string.IsNullOrWhiteSpace(endpointId))
+        {
+            return endpointId;
+        }
+
+        return primaryByEndpointId.TryGetValue(endpointId, out var primaryId) ? primaryId : endpointId;
+    }
+
+    private string NormalizeRoutePortSelectionId(string endpointId)
+    {
+        if (string.IsNullOrWhiteSpace(endpointId))
+        {
+            return endpointId;
+        }
+
+        var leftMapped = MapRouteEndpointIdForSource(endpointId);
+        var rightMapped = MapRouteEndpointIdForTarget(endpointId);
+        if (LeftRoutePorts.Any(port => string.Equals(port.Id, leftMapped, StringComparison.OrdinalIgnoreCase)))
+        {
+            return leftMapped;
+        }
+
+        if (RightRoutePorts.Any(port => string.Equals(port.Id, rightMapped, StringComparison.OrdinalIgnoreCase)))
+        {
+            return rightMapped;
+        }
+
+        return endpointId;
+    }
+
+    private HashSet<string> ResolveEquivalentEndpointIds(string endpointId)
+    {
+        var endpointIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { endpointId };
+
+        if (_portListPrimaryByEndpointId.TryGetValue(endpointId, out var portPrimaryId) &&
+            _portListMemberIdsByPrimaryId.TryGetValue(portPrimaryId, out var portMemberIds))
+        {
+            endpointIds.UnionWith(portMemberIds);
+        }
+
+        if (_leftRouteMemberIdsByPrimaryId.TryGetValue(endpointId, out var leftMemberIds))
+        {
+            endpointIds.UnionWith(leftMemberIds);
+        }
+
+        if (_rightRouteMemberIdsByPrimaryId.TryGetValue(endpointId, out var rightMemberIds))
+        {
+            endpointIds.UnionWith(rightMemberIds);
+        }
+
+        return endpointIds;
+    }
+
+    public string ResolveLeftRouteEndpointId(string endpointId)
+    {
+        return MapRouteEndpointIdForSource(endpointId);
+    }
+
+    public string ResolveRightRouteEndpointId(string endpointId)
+    {
+        return MapRouteEndpointIdForTarget(endpointId);
     }
 
     private void RefreshTrafficColumns()
@@ -1210,5 +1490,40 @@ public partial class RoutingViewModel : ObservableObject
         public bool AllOnline { get; set; }
 
         public double BytesPerSecond { get; set; }
+    }
+
+    private sealed class RouteEndpointAggregationState
+    {
+        public RouteEndpointAggregationState(
+            string primaryId,
+            string name,
+            string owner,
+            bool isLoopback,
+            bool isOnline,
+            bool supportsInput,
+            bool supportsOutput)
+        {
+            PrimaryId = primaryId;
+            Name = name;
+            Owner = owner;
+            IsLoopback = isLoopback;
+            IsOnline = isOnline;
+            SupportsInput = supportsInput;
+            SupportsOutput = supportsOutput;
+        }
+
+        public string PrimaryId { get; }
+
+        public string Name { get; }
+
+        public string Owner { get; }
+
+        public bool IsLoopback { get; set; }
+
+        public bool IsOnline { get; set; }
+
+        public bool SupportsInput { get; set; }
+
+        public bool SupportsOutput { get; set; }
     }
 }
